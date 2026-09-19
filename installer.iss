@@ -1,5 +1,5 @@
 #define AppName "RepoPulse"
-#define AppVersion "0.2.1"
+#define AppVersion "0.2.2"
 #define AppPublisher "RepoPulse"
 #define AppExeName "RepoPulse.exe"
 
@@ -40,6 +40,10 @@ Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Files]
 Source: "dist\RepoPulse\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[InstallDelete]
+Type: files; Name: "{app}\_internal\icuuc.dll"
+Type: files; Name: "{app}\_internal\icudt78.dll"
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"

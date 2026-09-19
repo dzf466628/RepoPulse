@@ -654,7 +654,7 @@ class MainWindow(QMainWindow):
         )
         if not self.app_icon.isNull():
             title_icon.setPixmap(self.app_icon.pixmap(40, 40))
-        self.title_version = QLabel("v0.2.1")
+        self.title_version = QLabel("v0.2.2")
         self.title_version.setStyleSheet("color: #718096; font-size: 10px; padding-bottom: 4px;")
         self.title_version.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         toolbar.addWidget(title_icon)

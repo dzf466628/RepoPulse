@@ -12,6 +12,7 @@ qt_runtime_names = (
     'vccorlib140.dll', 'opengl32sw.dll',
 )
 qt_binaries = [(str(qt_bin / name), 'PyQt6') for name in qt_runtime_names if (qt_bin / name).is_file()]
+excluded_external_binaries = {'icuuc.dll', 'icudt78.dll'}
 
 
 a = Analysis(
@@ -27,6 +28,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() not in excluded_external_binaries]
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -39,7 +41,8 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=True,
+    hide_console='hide-early',
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

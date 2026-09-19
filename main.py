@@ -7,6 +7,8 @@ from pathlib import Path
 # PyInstaller keeps PyQt6's Qt DLLs below the bundled runtime directory.
 # Register that directory before importing any Qt extension modules.
 if sys.platform == "win32" and getattr(sys, "frozen", False):
+    import ctypes
+
     _bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     _qt_dirs = (_bundle_root / "PyQt6", _bundle_root / "PyQt6" / "Qt6" / "bin")
     _qt_dll_handles = [
@@ -17,6 +19,11 @@ if sys.platform == "win32" and getattr(sys, "frozen", False):
     os.environ["PATH"] = os.pathsep.join(
         (*(str(qt_dir) for qt_dir in _qt_dirs if qt_dir.is_dir()), os.environ.get("PATH", ""))
     )
+    _qt_preloaded = []
+    for _qt_name in ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"):
+        _qt_path = _bundle_root / "PyQt6" / _qt_name
+        if _qt_path.is_file():
+            _qt_preloaded.append(ctypes.WinDLL(str(_qt_path)))
 
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
