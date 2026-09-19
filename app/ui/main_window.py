@@ -1674,7 +1674,7 @@ class MainWindow(QMainWindow):
         self._hide_busy_dialog()
         self._set_progress_style("error" if overall_error else "success")
         self._append_log("同步完成。" if not overall_error else "同步结束，部分渠道失败。")
-        self.refresh_selected()
+        self.refresh_selected(show_dialog=not self._tray_sync_requested)
         if has_more:
             QTimer.singleShot(0, self._start_next_automatic_sync)
             return
@@ -1899,17 +1899,18 @@ class MainWindow(QMainWindow):
     def refresh_all(self) -> None:
         self._start_refresh([project for project in self.projects if project.sync_enabled])
 
-    def refresh_selected(self) -> None:
+    def refresh_selected(self, show_dialog: bool = True) -> None:
         project = self._current_project()
         if project and project.sync_enabled:
-            self._start_refresh([project])
+            self._start_refresh([project], show_dialog=show_dialog)
 
-    def _start_refresh(self, projects: list[ProjectConfig]) -> None:
+    def _start_refresh(self, projects: list[ProjectConfig], show_dialog: bool = True) -> None:
         projects = [project for project in projects if project.sync_enabled]
         if not projects or (self.worker and self.worker.isRunning()):
             return
         self._set_busy(True)
-        self._show_busy_dialog("正在读取全部 Git 状态")
+        if show_dialog:
+            self._show_busy_dialog("正在读取全部 Git 状态")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
