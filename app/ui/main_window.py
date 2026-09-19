@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QApplication,
+    QDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -90,6 +91,72 @@ class OutlinedLabel(QLabel):
         painter.setPen(QPen(QColor("#F4F7FB"), 1.0))
         painter.drawText(text_rect, flags, text)
         painter.end()
+
+
+class BusyDialog(QDialog):
+    """Application-modal progress hint for operations running in workers."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("请等待")
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self.setModal(True)
+        self.setFixedSize(270, 124)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._message = "正在处理"
+        self._dot_count = 0
+        self._timer = QTimer(self)
+        self._timer.setInterval(320)
+        self._timer.timeout.connect(self._animate)
+
+        title = QLabel("请等待")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(
+            f"color: {ACCENT_COLOR}; font-size: 18px; font-weight: 700;"
+        )
+        self.message_label = QLabel()
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message_label.setWordWrap(True)
+        self.message_label.setMaximumHeight(34)
+        self.message_label.setStyleSheet("color: #D7DFEB; font-size: 11px;")
+        progress = QProgressBar()
+        progress.setRange(0, 0)
+        progress.setTextVisible(False)
+        progress.setFixedHeight(6)
+        progress.setStyleSheet(
+            f"QProgressBar {{ background: {PANEL_RAISED}; border: 1px solid {BORDER_COLOR}; border-radius: 3px; }}"
+            f"QProgressBar::chunk {{ background: {ACCENT_COLOR}; border-radius: 3px; }}"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(SPACE_3, SPACE_2, SPACE_3, SPACE_2)
+        layout.setSpacing(SPACE_1)
+        layout.addWidget(title)
+        layout.addWidget(self.message_label)
+        layout.addWidget(progress)
+        self.setStyleSheet(
+            f"QDialog {{ background: {PANEL_COLOR}; border: 1px solid {ACCENT_DARK}; border-radius: 12px; }}"
+        )
+
+    def set_message(self, message: str) -> None:
+        self._message = (message.strip() or "正在处理")[:48]
+        self._dot_count = 0
+        self._animate()
+
+    def _animate(self) -> None:
+        self.message_label.setText(f"{self._message}{'.' * self._dot_count}")
+        self._dot_count = (self._dot_count + 1) % 4
+
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self.parentWidget():
+            center = self.parentWidget().frameGeometry().center()
+            self.move(center - self.rect().center())
+        self._timer.start()
+        super().showEvent(event)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self._timer.stop()
+        super().closeEvent(event)
 
 
 class StatusCard(QFrame):
@@ -354,6 +421,7 @@ class MainWindow(QMainWindow):
         self.card_widgets: dict[str, StatusCard] = {}
         self.selected_git_key: str | None = None
         self.log_history: list[str] = []
+        self.busy_dialog: BusyDialog | None = None
         self._build_ui()
         self._reload_project_list()
         QTimer.singleShot(250, self.refresh_all)
@@ -488,12 +556,12 @@ class MainWindow(QMainWindow):
         action_layout = QHBoxLayout(action_frame)
         action_layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
         action_layout.setSpacing(SPACE_1)
-        sync_button = QPushButton("同步")
+        sync_button = QPushButton("提交并同步")
         sync_button.setObjectName("quickAction")
         sync_button.setFixedHeight(30)
         sync_button.setCursor(Qt.CursorShape.PointingHandCursor)
         sync_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        sync_button.setToolTip("同步当前项目到全部 Git 渠道")
+        sync_button.setToolTip("提交当前修改，并同步到全部 Git 渠道")
         sync_button.clicked.connect(self._sync_current_project)
         new_project_button = QPushButton("新建项目")
         new_project_button.setObjectName("quickAction")
@@ -800,6 +868,7 @@ class MainWindow(QMainWindow):
         detail.accept()
         self._delete_had_error = False
         self._set_delete_busy(True)
+        self._show_busy_dialog("正在删除项目")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self._set_progress_style("running")
@@ -823,6 +892,7 @@ class MainWindow(QMainWindow):
         if errors:
             for error in errors:
                 self._append_log(f"项目删除失败：{error}")
+            self._hide_busy_dialog()
             QMessageBox.warning(self, "项目删除未完成", "\n".join(errors))
             return
         if isinstance(project, ProjectConfig):
@@ -834,11 +904,13 @@ class MainWindow(QMainWindow):
 
     def _on_project_delete_failed(self, message: str) -> None:
         self._delete_had_error = True
+        self._hide_busy_dialog()
         self._append_log(f"项目删除失败：{message}")
         QMessageBox.warning(self, "项目删除未完成", message)
 
     def _on_project_delete_completed(self) -> None:
         self._set_delete_busy(False)
+        self._hide_busy_dialog()
         had_error = getattr(self, "_delete_had_error", False)
         self._set_progress_style("error" if had_error else "success")
         if not had_error:
@@ -854,7 +926,11 @@ class MainWindow(QMainWindow):
             return "error"
         if any(remote.get("error") for remote in remotes.values()):
             return "error"
-        if any(remote.get("relation") in {"已分叉", "远程领先", "本地领先"} for remote in remotes.values()):
+        relations = [str(remote.get("relation") or "") for remote in remotes.values()]
+        if any(
+            any(marker in relation for marker in ("不一致", "版本不同", "分叉", "领先", "待首次同步"))
+            for relation in relations
+        ):
             return "different"
         if not local.get("clean"):
             return "warning"
@@ -1043,7 +1119,12 @@ class MainWindow(QMainWindow):
         if data.get("error"):
             return StatusCard(key, title, subtitle, "连接失败", "#F27788", data["error"])
         if remote.kind == "local":
-            status, color = ("本地可用", "#70D6A5") if data.get("online") else ("读取失败", "#F27788")
+            if not data.get("online"):
+                status, color = "读取失败", "#F27788"
+            elif data.get("relation") == "一致":
+                status, color = "本地可用", "#70D6A5"
+            else:
+                status, color = data.get("relation", "版本不同"), "#F5C26B"
         else:
             status = data.get("relation", "已连接") if data.get("online") else "未连接"
             color = "#70D6A5" if data.get("online") and status == "一致" else "#9CC6FF" if data.get("online") else "#F27788"
@@ -1259,6 +1340,8 @@ class MainWindow(QMainWindow):
         self.log_history = self.log_history[-100:]
         self.log_label.setText(message)
         self.log_label.setToolTip("\n".join(self.log_history))
+        if self.busy_dialog is not None and message:
+            self.busy_dialog.set_message(message)
 
     def _sync_current_project(self) -> None:
         project = self._current_project()
@@ -1268,16 +1351,38 @@ class MainWindow(QMainWindow):
         if not project.remotes:
             QMessageBox.information(self, "没有 Git 渠道", "当前项目还没有可同步的 Git 渠道。")
             return
+        local = GitService().local_status(project)
+        if local.get("error"):
+            QMessageBox.warning(self, "无法提交", str(local.get("error")))
+            return
+        has_changes = any(local.get(key, 0) for key in ("staged", "modified", "untracked", "conflicts"))
+        commit_message = ""
+        if has_changes:
+            default_message = f"更新项目：{project.name}"
+            commit_message, ok = QInputDialog.getText(
+                self,
+                "提交并同步",
+                "提交说明：",
+                text=default_message,
+            )
+            if not ok:
+                return
+            commit_message = commit_message.strip() or default_message
         confirm = QMessageBox(self)
-        confirm.setWindowTitle("确认同步")
+        confirm.setWindowTitle("确认提交并同步")
         confirm.setIcon(QMessageBox.Icon.Question)
-        confirm.setText(f"将“{project.name}”同步到全部 Git 渠道吗？\n\n同步会向远程仓库推送当前已提交内容。")
-        yes_button = confirm.addButton("开始同步", QMessageBox.ButtonRole.AcceptRole)
+        action_text = (
+            f"将先提交当前修改（{commit_message}），再同步到全部 Git 渠道。"
+            if commit_message
+            else "当前没有待提交修改，将直接同步已提交内容。"
+        )
+        confirm.setText(f"确定处理“{project.name}”吗？\n\n{action_text}")
+        yes_button = confirm.addButton("提交并同步", QMessageBox.ButtonRole.AcceptRole)
         confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
         confirm.exec()
         if confirm.clickedButton() is not yes_button:
             return
-        self._start_sync(project)
+        self._start_sync(project, commit_message)
 
     def _set_sync_busy(self, busy: bool) -> None:
         for button in self.quick_buttons:
@@ -1289,19 +1394,20 @@ class MainWindow(QMainWindow):
             button.setEnabled(not busy)
         self.settings_button.setEnabled(not busy)
 
-    def _start_sync(self, project: ProjectConfig) -> None:
+    def _start_sync(self, project: ProjectConfig, commit_message: str = "") -> None:
         if self.sync_worker and self.sync_worker.isRunning():
             return
         if self.worker and self.worker.isRunning():
             self._append_log("状态检查进行中，请稍后再同步。")
             return
         self._set_sync_busy(True)
+        self._show_busy_dialog("正在提交并同步全部 Git 渠道" if commit_message else "正在同步全部 Git 渠道")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self._set_progress_style("running")
-        self._append_log(f"开始同步：{project.name}")
+        self._append_log(f"开始提交并同步：{project.name}" if commit_message else f"开始同步：{project.name}")
         self._sync_had_error = False
-        self.sync_worker = SyncWorker(project)
+        self.sync_worker = SyncWorker(project, commit_message=commit_message)
         self.sync_worker.log_message.connect(self._append_log)
         self.sync_worker.progress_changed.connect(self._on_progress_changed)
         self.sync_worker.result_ready.connect(self._on_sync_result)
@@ -1317,10 +1423,12 @@ class MainWindow(QMainWindow):
 
     def _on_sync_failed(self, message: str) -> None:
         self._sync_had_error = True
+        self._hide_busy_dialog()
         self._append_log(f"同步失败：{message}")
 
     def _on_sync_completed(self) -> None:
         self._set_sync_busy(False)
+        self._hide_busy_dialog()
         self._set_progress_style("error" if getattr(self, "_sync_had_error", False) else "success")
         self._append_log("同步完成。" if not getattr(self, "_sync_had_error", False) else "同步结束，部分渠道失败。")
         self.refresh_selected()
@@ -1373,6 +1481,7 @@ class MainWindow(QMainWindow):
             self._append_log("状态检查进行中，请稍后再创建项目。")
             return
         self._set_create_busy(True)
+        self._show_busy_dialog("正在准备项目与 Git 仓库")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self._set_progress_style("running")
@@ -1400,16 +1509,19 @@ class MainWindow(QMainWindow):
                 else f"项目已创建，但有 {len(errors)} 个 Git 渠道未完成。"
             )
             if errors:
+                self._hide_busy_dialog()
                 QMessageBox.warning(self, "项目创建未完成", "\n".join(errors))
 
     def _on_project_create_failed(self, message: str) -> None:
         self.store.save(self.projects)
         self._create_had_error = True
+        self._hide_busy_dialog()
         self._append_log(f"项目创建失败：{message}")
         QMessageBox.warning(self, "项目创建未完成", message)
 
     def _on_project_create_completed(self) -> None:
         self._set_create_busy(False)
+        self._hide_busy_dialog()
         had_error = getattr(self, "_create_had_error", False)
         self._set_progress_style("error" if had_error else "success")
         if not had_error:
@@ -1435,6 +1547,22 @@ class MainWindow(QMainWindow):
             "color: #E8ECF2; text-align: center; padding: 0; }"
             f"QProgressBar::chunk {{ background: {chunk}; border-radius: 3px; }}"
         )
+
+    def _show_busy_dialog(self, message: str) -> None:
+        if self.busy_dialog is None:
+            self.busy_dialog = BusyDialog(self)
+        self.busy_dialog.set_message(message)
+        self.busy_dialog.show()
+        self.busy_dialog.raise_()
+        self.busy_dialog.activateWindow()
+
+    def _hide_busy_dialog(self) -> None:
+        if self.busy_dialog is None:
+            return
+        dialog = self.busy_dialog
+        self.busy_dialog = None
+        dialog.close()
+        dialog.deleteLater()
 
     def _on_progress_changed(self, completed: int, total: int) -> None:
         percentage = round(completed * 100 / total) if total else 0
@@ -1467,6 +1595,7 @@ class MainWindow(QMainWindow):
         if not projects or (self.worker and self.worker.isRunning()):
             return
         self._set_busy(True)
+        self._show_busy_dialog("正在读取全部 Git 状态")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("%p%")
@@ -1489,6 +1618,7 @@ class MainWindow(QMainWindow):
 
     def _on_refresh_completed(self) -> None:
         self._set_busy(False)
+        self._hide_busy_dialog()
         has_error = any(
             result.get("local", {}).get("error")
             or any(remote.get("error") for remote in result.get("remotes", {}).values())

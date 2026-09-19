@@ -143,7 +143,7 @@ class ProjectDetailDialog(QDialog):
             "QPushButton:pressed { background: #5D2434; }"
         )
         delete_button.clicked.connect(self._confirm_delete)
-        sync_button = QPushButton("同步")
+        sync_button = QPushButton("提交并同步")
         sync_button.setFixedHeight(30)
         sync_button.clicked.connect(self.sync_requested.emit)
         close_button = QPushButton("关闭")

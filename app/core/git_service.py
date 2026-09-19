@@ -194,6 +194,7 @@ class GitService:
                 "url": clone_url or ssh_url,
                 "clone_url": clone_url or ssh_url,
                 "ssh_url": ssh_url,
+                "default_branch": str(item.get("default_branch") or ""),
                 "description": str(item.get("description") or ""),
             })
         repositories.sort(key=lambda item: item["name"].casefold())
@@ -356,6 +357,7 @@ class GitService:
                 else:
                     wanted = project.name.casefold()
                     existing = None
+                    self.log(f"检查已有远程仓库：{label} / {project.name}")
                     try:
                         existing = next(
                             (
@@ -632,8 +634,32 @@ class GitService:
                 result["branch"] = detected_branch
             result["online"] = bool(result["head"])
             if not result["head"]:
-                result["relation"] = "分支不存在"
-                return result
+                # An API-visible repository with no refs is a newly created
+                # empty repository, not a connection failure. Also recover
+                # when the service reports a different default branch.
+                try:
+                    repository = next(
+                        (
+                            item
+                            for item in self.discover_host_repositories(remote)
+                            if str(item.get("name") or "").casefold() == project.name.casefold()
+                        ),
+                        None,
+                    )
+                except GitCommandError:
+                    repository = None
+                default_branch = str(repository.get("default_branch") or "") if repository else ""
+                if default_branch and default_branch != branch:
+                    result["branch"] = default_branch
+                    result["head"], _ = self._remote_head(remote, default_branch, effective_url)
+                if not result["head"] and repository is not None:
+                    result["online"] = True
+                    result["relation"] = "待首次同步"
+                    return result
+                if not result["head"]:
+                    result["relation"] = "分支不存在"
+                    return result
+                result["online"] = True
             if local.get("head") and local["head"] == result["head"]:
                 result["relation"] = "一致"
                 result["last_commit"] = local.get("last_commit", {})
@@ -728,6 +754,36 @@ class GitService:
                 progress()
         return {"project_id": project.project_id, "results": results}
 
+    def commit_project(self, project: ProjectConfig, message: str) -> dict:
+        """Commit all current project changes before a requested sync."""
+        source = Path(project.workspace_path).expanduser()
+        if not source.is_dir():
+            raise GitCommandError(f"本地项目目录不存在：{source}")
+        self._run(["rev-parse", "--show-toplevel"], cwd=source)
+        status = self._run(["status", "--porcelain"], cwd=source)
+        if not status:
+            return {"committed": False, "message": "没有待提交修改"}
+        commit_message = message.strip() or f"更新项目：{project.name}"
+        self._run(["add", "-A"], cwd=source)
+        staged = self._run(["diff", "--cached", "--name-only"], cwd=source)
+        if not staged:
+            return {"committed": False, "message": "没有可提交的文件"}
+        try:
+            self._run(["config", "user.name"], cwd=source)
+        except GitCommandError:
+            self._run(["config", "user.name", "RepoPulse"], cwd=source)
+        try:
+            self._run(["config", "user.email"], cwd=source)
+        except GitCommandError:
+            self._run(["config", "user.email", "repopulse@local"], cwd=source)
+        self._run(["commit", "-m", commit_message], cwd=source, timeout=60)
+        head = self._run(["rev-parse", "HEAD"], cwd=source)
+        return {
+            "committed": True,
+            "message": f"已提交 {len(staged.splitlines())} 个文件：{commit_message}",
+            "head": head,
+        }
+
     def _sync_local_channel(
         self,
         source: Path,
@@ -746,9 +802,15 @@ class GitService:
             self._run(["rev-parse", "--show-toplevel"], cwd=target)
         except GitCommandError:
             self._run(["init", "-q", "-b", branch], cwd=target)
-        target_dirty = self._run(["status", "--porcelain"], cwd=target)
-        if target_dirty:
-            return {"ok": False, "message": f"{label}：目标目录有未提交改动，已跳过"}
+        target_status = self._run(["status", "--porcelain"], cwd=target)
+        tracked_dirty = [
+            line for line in target_status.splitlines()
+            if line and not line.startswith("?? ")
+        ]
+        if tracked_dirty:
+            return {"ok": False, "message": f"{label}：目标目录有已跟踪文件改动，已跳过"}
+        if target_status:
+            self.log(f"{label}：保留目标目录中的未跟踪文件，继续同步")
         self.log(f"同步 {label}：{target}")
         self._run(["fetch", "--quiet", str(source), branch], cwd=target, timeout=45)
         self._run(["checkout", "-B", branch, "FETCH_HEAD"], cwd=target, timeout=45)

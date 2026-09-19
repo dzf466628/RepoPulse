@@ -47,14 +47,17 @@ class SyncWorker(QThread):
     completed = pyqtSignal()
     progress_changed = pyqtSignal(int, int)
 
-    def __init__(self, project: ProjectConfig):
+    def __init__(self, project: ProjectConfig, commit_message: str = ""):
         super().__init__()
         self.project = project
+        self.commit_message = commit_message
 
     def run(self) -> None:
         try:
             service = GitService(log=self.log_message.emit)
-            total = len(self.project.remotes)
+            local = service.local_status(self.project)
+            needs_commit = bool(self.commit_message) or not local.get("clean", False)
+            total = len(self.project.remotes) + (1 if needs_commit else 0)
             completed = 0
             self.progress_changed.emit(0, total)
 
@@ -63,6 +66,13 @@ class SyncWorker(QThread):
                 completed += 1
                 self.progress_changed.emit(completed, total)
 
+            if needs_commit:
+                commit_result = service.commit_project(
+                    self.project,
+                    self.commit_message or f"更新项目：{self.project.name}",
+                )
+                self.log_message.emit(commit_result["message"])
+                mark_complete()
             result = service.sync_project(self.project, progress=mark_complete)
             self.result_ready.emit(result)
         except Exception as exc:  # pragma: no cover - 最后一道线程保护
