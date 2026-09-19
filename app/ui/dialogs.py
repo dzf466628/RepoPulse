@@ -9,6 +9,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QComboBox,
     QCheckBox,
+    QAbstractSpinBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -31,7 +32,7 @@ from PyQt6.QtWidgets import (
 
 from app.core.git_service import GitCommandError, GitService
 from app.models import ProjectConfig, RemoteConfig
-from app.ui.theme import ACCENT_COLOR, ACCENT_DARK, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
+from app.ui.theme import ACCENT_COLOR, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
 
 
 GIT_TYPES = [
@@ -437,15 +438,15 @@ class SettingsDialog(QDialog):
         layout.setSpacing(SPACE_2)
         page.setStyleSheet(
             f"""
-            QCheckBox {{ color: #E8ECF2; spacing: 8px; padding: 3px 0; }}
+            QCheckBox {{ color: #E8ECF2; spacing: 8px; padding: 0; }}
             QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid #3D6475; background: #0A2231; }}
             QCheckBox::indicator:hover {{ border-color: {ACCENT_COLOR}; background: #123D4D; }}
             QCheckBox::indicator:checked {{ border-color: {ACCENT_COLOR}; background: {ACCENT_COLOR}; }}
-            QSpinBox {{ color: #F4F7FB; background: #0A2231; border: 1px solid #315365; border-radius: 6px; padding: 2px 24px 2px 8px; min-height: 28px; max-height: 28px; }}
+            QSpinBox {{ color: #F4F7FB; background: #0A2231; border: 1px solid #315365; border-radius: 5px; padding: 0 20px 0 7px; min-height: 22px; max-height: 22px; }}
             QSpinBox:hover {{ border-color: {ACCENT_COLOR}; }}
             QSpinBox:focus {{ border-color: {ACCENT_COLOR}; }}
-            QSpinBox::up-button, QSpinBox::down-button {{ width: 18px; border: 0; background: #123D4D; }}
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {ACCENT_DARK}; }}
+            QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; border: 0; background: transparent; }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: #123D4D; }}
             """
         )
         title = QLabel("同步设置")
@@ -470,6 +471,8 @@ class SettingsDialog(QDialog):
         self.scheduled_seconds.setRange(1, 59)
         for spin in (self.scheduled_hours, self.scheduled_minutes, self.scheduled_seconds):
             spin.setFixedWidth(58)
+            spin.setFixedHeight(24)
+            spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
             spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scheduled_hours.setValue(settings.value("scheduled_sync_hours", 0, type=int))
         self.scheduled_minutes.setValue(settings.value("scheduled_sync_minutes", 0, type=int))
@@ -491,6 +494,8 @@ class SettingsDialog(QDialog):
         self.leading_threshold.setRange(1, 9999)
         self.leading_threshold.setValue(settings.value("leading_sync_threshold", 1, type=int))
         self.leading_threshold.setFixedWidth(72)
+        self.leading_threshold.setFixedHeight(24)
+        self.leading_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.leading_threshold.setAlignment(Qt.AlignmentFlag.AlignCenter)
         leading_row = QHBoxLayout()
         leading_row.setContentsMargins(0, 0, 0, 0)
