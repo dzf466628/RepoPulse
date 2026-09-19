@@ -58,6 +58,7 @@ class ProjectConfig:
     default_branch: str = ""
     remotes: dict[str, RemoteConfig] = field(default_factory=dict)
     card_order: list[str] = field(default_factory=list)
+    sync_enabled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -67,6 +68,7 @@ class ProjectConfig:
             "default_branch": self.default_branch,
             "remotes": {key: value.to_dict() for key, value in self.remotes.items()},
             "card_order": list(self.card_order),
+            "sync_enabled": self.sync_enabled,
         }
 
     @classmethod
@@ -83,4 +85,5 @@ class ProjectConfig:
             default_branch=str(data.get("default_branch") or ""),
             remotes=remotes,
             card_order=[str(item) for item in (data.get("card_order") or []) if str(item)],
+            sync_enabled=bool(data.get("sync_enabled", False)),
         )

@@ -331,6 +331,7 @@ class StatusCard(QFrame):
 
 class ProjectListWidget(QListWidget):
     hover_row_changed = pyqtSignal(int)
+    switch_clicked = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -345,24 +346,41 @@ class ProjectListWidget(QListWidget):
         self.hover_row_changed.emit(-1)
         super().leaveEvent(event)
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if event.button() == Qt.MouseButton.LeftButton:
+            item = self.itemAt(event.position().toPoint())
+            if item is not None and event.position().x() >= self.visualItemRect(item).right() - 56:
+                self.switch_clicked.emit(self.row(item))
+                return
+        super().mousePressEvent(event)
+
 
 class CapsuleSwitch(QWidget):
-    """项目行右侧的静态开关外观，交互功能留待后续接入。"""
+    """项目行右侧的项目连接开关。"""
 
-    def __init__(self, parent=None):
+    toggled = pyqtSignal(bool)
+
+    def __init__(self, checked: bool = False, parent=None):
         super().__init__(parent)
+        self._checked = checked
         self.setFixedSize(42, 24)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def setChecked(self, checked: bool) -> None:
+        self._checked = bool(checked)
+        self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(QPen(QColor("#315365"), 1))
-        painter.setBrush(QColor("#163546"))
+        track = QColor(ACCENT_COLOR if self._checked else "#163546")
+        knob = QColor("#071D2C" if self._checked else "#A9B8C4")
+        painter.setPen(QPen(track if self._checked else QColor("#315365"), 1))
+        painter.setBrush(track)
         painter.drawRoundedRect(1, 3, 40, 18, 9, 9)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#A9B8C4"))
-        painter.drawEllipse(4, 6, 12, 12)
+        painter.setBrush(knob)
+        painter.drawEllipse(25 if self._checked else 4, 6, 12, 12)
         painter.end()
 
 
@@ -594,6 +612,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(project_header)
         self.project_list = ProjectListWidget()
         self.project_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.project_list.switch_clicked.connect(self._toggle_project_sync)
         self.project_list.setMinimumHeight(500)
         self.project_list.setIconSize(QSize(40, 40))
         self.project_list.setStyleSheet(
@@ -877,7 +896,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(icon_slot)
         layout.addWidget(status)
         layout.addWidget(name, 1)
-        layout.addWidget(CapsuleSwitch(content))
+        layout.addWidget(CapsuleSwitch(project.sync_enabled, content))
         separator = QFrame()
         separator.setFixedHeight(1)
         separator.setStyleSheet(f"background: {BORDER_COLOR}; border: 0; margin: 0;")
@@ -1058,6 +1077,28 @@ class MainWindow(QMainWindow):
     def _current_project(self) -> ProjectConfig | None:
         row = self.project_list.currentRow()
         return self.projects[row] if 0 <= row < len(self.projects) else None
+
+    def _toggle_project_sync(self, row: int) -> None:
+        if not (0 <= row < len(self.projects)):
+            return
+        if any(worker and worker.isRunning() for worker in (self.sync_worker, self.create_worker)):
+            self._append_log("当前任务进行中，暂时不能切换项目开关。")
+            return
+        project = self.projects[row]
+        project.sync_enabled = not project.sync_enabled
+        self.store.save(self.projects)
+        if not project.sync_enabled:
+            self.results.pop(project.project_id, None)
+        self._reload_project_list(select_id=project.project_id)
+        if self._current_project() and self._current_project().project_id == project.project_id:
+            self._render_cards(self.results.get(project.project_id))
+        self._append_log(
+            f"已开启项目连接：{project.name}"
+            if project.sync_enabled
+            else f"已关闭项目连接：{project.name}"
+        )
+        if project.sync_enabled:
+            self.refresh_selected()
 
     def _show_current_project(self, _row: int) -> None:
         project = self._current_project()
@@ -1731,7 +1772,9 @@ class MainWindow(QMainWindow):
     def _queue_automatic_sync(self, projects: list[ProjectConfig], reason: str) -> None:
         if self.auto_sync_queue or (self.sync_worker and self.sync_worker.isRunning()):
             return
-        self.auto_sync_queue = list(projects)
+        self.auto_sync_queue = [project for project in projects if project.sync_enabled]
+        if not self.auto_sync_queue:
+            return
         self.auto_sync_reason = reason
         self._start_next_automatic_sync()
 
@@ -1744,7 +1787,7 @@ class MainWindow(QMainWindow):
         if self.sync_worker and self.sync_worker.isRunning():
             return
         project = self.auto_sync_queue.pop(0)
-        if not project.workspace_path or not project.remotes:
+        if not project.sync_enabled or not project.workspace_path or not project.remotes:
             self._start_next_automatic_sync()
             return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1762,14 +1805,15 @@ class MainWindow(QMainWindow):
             button.setEnabled(not busy)
 
     def refresh_all(self) -> None:
-        self._start_refresh(self.projects)
+        self._start_refresh([project for project in self.projects if project.sync_enabled])
 
     def refresh_selected(self) -> None:
         project = self._current_project()
-        if project:
+        if project and project.sync_enabled:
             self._start_refresh([project])
 
     def _start_refresh(self, projects: list[ProjectConfig]) -> None:
+        projects = [project for project in projects if project.sync_enabled]
         if not projects or (self.worker and self.worker.isRunning()):
             return
         self._set_busy(True)
@@ -1802,7 +1846,10 @@ class MainWindow(QMainWindow):
             return
         threshold = max(1, int(values["threshold"]))
         project = next((item for item in self.projects if item.project_id == result.get("project_id")), None)
-        if not project:
+        if project and not project.sync_enabled:
+            self.results.pop(project.project_id, None)
+            return
+        if not project or not project.sync_enabled:
             return
         if any(
             remote.get("kind") == "local" and int(remote.get("ahead") or 0) >= threshold
