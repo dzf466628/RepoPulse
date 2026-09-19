@@ -8,17 +8,19 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from PyQt6.QtCore import QPoint, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QPoint, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QApplication,
+    QCheckBox,
     QDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMainWindow,
     QInputDialog,
     QMessageBox,
@@ -27,6 +29,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
     QToolButton,
@@ -406,6 +409,9 @@ class MainWindow(QMainWindow):
         self.app_icon = QIcon(str(Path(__file__).resolve().parents[2] / "RepoPulse.png"))
         if not self.app_icon.isNull():
             self.setWindowIcon(self.app_icon)
+        self.tray_icon: QSystemTrayIcon | None = None
+        self._allow_close = False
+        self._setup_tray()
         set_dark_title_bar(self)
         self.store = ProjectStore()
         self.projects = self.store.load()
@@ -425,6 +431,93 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._reload_project_list()
         QTimer.singleShot(250, self.refresh_all)
+
+    def _setup_tray(self) -> None:
+        if not QSystemTrayIcon.isSystemTrayAvailable() or self.app_icon.isNull():
+            return
+        self.tray_icon = QSystemTrayIcon(self.app_icon, self)
+        self.tray_icon.setToolTip("RepoPulse · Git 状态台")
+        menu = QMenu(self)
+        show_action = QAction("显示 RepoPulse", self)
+        show_action.triggered.connect(self._show_from_tray)
+        exit_action = QAction("退出软件", self)
+        exit_action.triggered.connect(self._exit_from_tray)
+        menu.addAction(show_action)
+        menu.addSeparator()
+        menu.addAction(exit_action)
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._tray_activated)
+        self.tray_icon.show()
+
+    def _show_from_tray(self) -> None:
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _exit_from_tray(self) -> None:
+        self._allow_close = True
+        self.close()
+
+    def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in {
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.DoubleClick,
+        }:
+            self._show_from_tray()
+
+    @staticmethod
+    def _close_settings() -> tuple[bool, bool]:
+        try:
+            settings = QSettings("RepoPulse", "RepoPulse")
+            prompt = settings.value("close_prompt", True, type=bool)
+            close_to_tray = settings.value("close_to_tray", True, type=bool)
+            return prompt, close_to_tray
+        except Exception:
+            return True, True
+
+    @staticmethod
+    def _save_close_settings(prompt: bool, close_to_tray: bool) -> None:
+        try:
+            settings = QSettings("RepoPulse", "RepoPulse")
+            settings.setValue("close_prompt", prompt)
+            settings.setValue("close_to_tray", close_to_tray)
+            settings.sync()
+        except Exception:
+            pass
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
+        if self._allow_close:
+            if self.tray_icon:
+                self.tray_icon.hide()
+            event.accept()
+            return
+        prompt, close_to_tray = self._close_settings()
+        can_tray = self.tray_icon is not None
+        if prompt:
+            confirm = QMessageBox(self)
+            confirm.setWindowTitle("关闭 RepoPulse")
+            confirm.setIcon(QMessageBox.Icon.Question)
+            confirm.setText("要如何处理 RepoPulse？")
+            tray_button = confirm.addButton("最小化到托盘", QMessageBox.ButtonRole.AcceptRole)
+            close_button = confirm.addButton("关闭软件", QMessageBox.ButtonRole.DestructiveRole)
+            confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            tray_button.setEnabled(can_tray)
+            remember = QCheckBox("下次不再提醒")
+            confirm.setCheckBox(remember)
+            confirm.exec()
+            clicked = confirm.clickedButton()
+            if clicked not in {tray_button, close_button}:
+                event.ignore()
+                return
+            close_to_tray = clicked is tray_button
+            if remember.isChecked():
+                self._save_close_settings(False, close_to_tray)
+        if close_to_tray and can_tray:
+            self.hide()
+            event.ignore()
+            return
+        self._allow_close = True
+        event.accept()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -599,8 +692,8 @@ class MainWindow(QMainWindow):
         info_layout.setSpacing(SPACE_1)
         self.settings_button = QToolButton()
         self.settings_button.setObjectName("settingsButton")
-        self.settings_button.setToolTip("设置与管理")
-        self.settings_button.setAccessibleName("设置与管理")
+        self.settings_button.setToolTip("同步设置")
+        self.settings_button.setAccessibleName("同步设置")
         self.settings_button.setIcon(_settings_icon())
         self.settings_button.setIconSize(QSize(17, 17))
         self.settings_button.setFixedSize(28, 26)
@@ -1122,7 +1215,7 @@ class MainWindow(QMainWindow):
             if not data.get("online"):
                 status, color = "读取失败", "#F27788"
             elif data.get("relation") == "一致":
-                status, color = "本地可用", "#70D6A5"
+                status, color = "一致", "#70D6A5"
             else:
                 status, color = data.get("relation", "版本不同"), "#F5C26B"
         else:

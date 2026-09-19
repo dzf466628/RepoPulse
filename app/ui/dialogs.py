@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QSettings, Qt, pyqtSignal
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -352,13 +352,13 @@ class RepositoryDetailDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
-    """设置与管理弹窗：左侧导航，右侧内容。"""
+    """同步设置弹窗：左侧导航，右侧内容。"""
 
     add_git_requested = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("设置与管理")
+        self.setWindowTitle("同步设置")
         self.setMinimumSize(680, 420)
         self.resize(720, 460)
         self._build_ui()
@@ -366,11 +366,12 @@ class SettingsDialog(QDialog):
     def _build_ui(self) -> None:
         self.menu_list = QListWidget()
         self.menu_list.setFixedWidth(150)
-        self.menu_list.addItems(["添加 Git", "界面", "关于"])
+        self.menu_list.addItems(["添加 Git", "同步设置", "软件设置", "关于"])
 
         self.pages = QStackedWidget()
         self.pages.addWidget(self._build_git_page())
         self.pages.addWidget(self._build_appearance_page())
+        self.pages.addWidget(self._build_software_page())
         self.pages.addWidget(self._build_about_page())
         self.menu_list.currentRowChanged.connect(self._switch_page)
         self.menu_list.setCurrentRow(0)
@@ -431,13 +432,57 @@ class SettingsDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
-        title = QLabel("界面")
+        title = QLabel("同步设置")
         title.setStyleSheet("font-size: 17px; font-weight: 700; color: #F4F7FB;")
         theme = QLabel("深色主题")
         layout.addWidget(title)
         layout.addWidget(theme)
         layout.addStretch(1)
         return page
+
+    def _build_software_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
+        layout.setSpacing(SPACE_2)
+        title = QLabel("软件设置")
+        title.setStyleSheet("font-size: 17px; font-weight: 700; color: #F4F7FB;")
+
+        settings = QSettings("RepoPulse", "RepoPulse")
+        try:
+            prompt = settings.value("close_prompt", True, type=bool)
+            close_to_tray = settings.value("close_to_tray", True, type=bool)
+        except Exception:
+            prompt, close_to_tray = True, True
+
+        self.close_prompt_check = QCheckBox("关闭软件时提示选择")
+        self.close_prompt_check.setChecked(prompt)
+        self.close_prompt_check.setToolTip("关闭窗口时选择最小化到托盘或退出软件")
+        self.close_action_combo = QComboBox()
+        self.close_action_combo.addItem("最小化到托盘", True)
+        self.close_action_combo.addItem("关闭软件", False)
+        self.close_action_combo.setCurrentIndex(0 if close_to_tray else 1)
+        self.close_action_combo.setToolTip("关闭提示被关闭后使用的默认操作")
+        self.close_prompt_check.toggled.connect(self._save_software_settings)
+        self.close_action_combo.currentIndexChanged.connect(self._save_software_settings)
+
+        form = QFormLayout()
+        form.setSpacing(SPACE_2)
+        form.addRow("关闭行为", self.close_prompt_check)
+        form.addRow("默认操作", self.close_action_combo)
+        layout.addWidget(title)
+        layout.addLayout(form)
+        layout.addStretch(1)
+        return page
+
+    def _save_software_settings(self) -> None:
+        try:
+            settings = QSettings("RepoPulse", "RepoPulse")
+            settings.setValue("close_prompt", self.close_prompt_check.isChecked())
+            settings.setValue("close_to_tray", bool(self.close_action_combo.currentData()))
+            settings.sync()
+        except Exception:
+            pass
 
     def _build_about_page(self) -> QWidget:
         page = QWidget()

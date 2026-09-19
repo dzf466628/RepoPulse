@@ -35,6 +35,7 @@ def check(name: str, fn) -> None:
 def test_window_creates() -> None:
     window = MainWindow()
     assert window.minimumWidth() >= 900
+    window._allow_close = True
     window.close()
 
 
