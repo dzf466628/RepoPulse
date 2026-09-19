@@ -442,11 +442,9 @@ class SettingsDialog(QDialog):
             QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid #3D6475; background: #0A2231; }}
             QCheckBox::indicator:hover {{ border-color: {ACCENT_COLOR}; background: #123D4D; }}
             QCheckBox::indicator:checked {{ border-color: {ACCENT_COLOR}; background: {ACCENT_COLOR}; }}
-            QSpinBox {{ color: #F4F7FB; background: #0A2231; border: 1px solid #315365; border-radius: 5px; padding: 0 20px 0 7px; min-height: 22px; max-height: 22px; }}
+            QSpinBox {{ color: #F4F7FB; background: #0A2231; border: 1px solid #315365; border-radius: 5px; padding: 0 4px; min-height: 20px; max-height: 20px; }}
             QSpinBox:hover {{ border-color: {ACCENT_COLOR}; }}
             QSpinBox:focus {{ border-color: {ACCENT_COLOR}; }}
-            QSpinBox::up-button, QSpinBox::down-button {{ width: 16px; border: 0; background: transparent; }}
-            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: #123D4D; }}
             """
         )
         title = QLabel("同步设置")
@@ -470,8 +468,8 @@ class SettingsDialog(QDialog):
         self.scheduled_seconds = QSpinBox()
         self.scheduled_seconds.setRange(1, 59)
         for spin in (self.scheduled_hours, self.scheduled_minutes, self.scheduled_seconds):
-            spin.setFixedWidth(58)
-            spin.setFixedHeight(24)
+            spin.setFixedWidth(64)
+            spin.setFixedHeight(22)
             spin.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
             spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scheduled_hours.setValue(settings.value("scheduled_sync_hours", 0, type=int))
@@ -494,13 +492,12 @@ class SettingsDialog(QDialog):
         self.leading_threshold.setRange(1, 9999)
         self.leading_threshold.setValue(settings.value("leading_sync_threshold", 1, type=int))
         self.leading_threshold.setFixedWidth(72)
-        self.leading_threshold.setFixedHeight(24)
+        self.leading_threshold.setFixedHeight(22)
         self.leading_threshold.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.leading_threshold.setAlignment(Qt.AlignmentFlag.AlignCenter)
         leading_row = QHBoxLayout()
         leading_row.setContentsMargins(0, 0, 0, 0)
         leading_row.setSpacing(SPACE_1)
-        leading_row.addSpacing(26)
         leading_row.addWidget(QLabel("本地领先"))
         leading_row.addWidget(self.leading_threshold)
         leading_row.addWidget(QLabel("步时自动同步"))
