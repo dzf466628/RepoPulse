@@ -336,14 +336,29 @@ class ProjectListWidget(QListWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMouseTracking(True)
+        self._hovered_switch: CapsuleSwitch | None = None
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
         item = self.itemAt(event.position().toPoint())
         self.hover_row_changed.emit(self.row(item) if item else -1)
+        current_switch = None
+        if item is not None and event.position().x() >= self.visualItemRect(item).right() - 56:
+            row_widget = self.itemWidget(item)
+            if row_widget is not None:
+                current_switch = row_widget.findChild(CapsuleSwitch)
+        if self._hovered_switch is not current_switch:
+            if self._hovered_switch is not None:
+                self._hovered_switch.set_hovered(False)
+            self._hovered_switch = current_switch
+        if current_switch is not None:
+            current_switch.set_hovered(True)
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
         self.hover_row_changed.emit(-1)
+        if self._hovered_switch is not None:
+            self._hovered_switch.set_hovered(False)
+            self._hovered_switch = None
         super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -363,6 +378,10 @@ class CapsuleSwitch(QWidget):
     def __init__(self, checked: bool = False, parent=None):
         super().__init__(parent)
         self._checked = checked
+        self._hover_amount = 0.0
+        self._hover_animation = QVariantAnimation(self)
+        self._hover_animation.setDuration(140)
+        self._hover_animation.valueChanged.connect(self._on_hover_value)
         self.setFixedSize(42, 24)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
@@ -370,11 +389,38 @@ class CapsuleSwitch(QWidget):
         self._checked = bool(checked)
         self.update()
 
+    def set_hovered(self, hovered: bool) -> None:
+        self._hover_animation.stop()
+        self._hover_animation.setStartValue(self._hover_amount)
+        self._hover_animation.setEndValue(1.0 if hovered else 0.0)
+        self._hover_animation.start()
+
+    def _on_hover_value(self, value) -> None:
+        self._hover_amount = float(value)
+        self.update()
+
+    @staticmethod
+    def _blend(first: QColor, second: QColor, amount: float) -> QColor:
+        amount = max(0.0, min(1.0, amount))
+        return QColor(
+            round(first.red() + (second.red() - first.red()) * amount),
+            round(first.green() + (second.green() - first.green()) * amount),
+            round(first.blue() + (second.blue() - first.blue()) * amount),
+        )
+
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        track = QColor(ACCENT_COLOR if self._checked else "#163546")
-        knob = QColor("#071D2C" if self._checked else "#A9B8C4")
+        track = self._blend(
+            QColor(ACCENT_COLOR if self._checked else "#163546"),
+            QColor(ACCENT_HOVER if self._checked else "#245267"),
+            self._hover_amount,
+        )
+        knob = self._blend(
+            QColor("#071D2C" if self._checked else "#A9B8C4"),
+            QColor("#FFFFFF" if self._checked else "#DCE8EF"),
+            self._hover_amount,
+        )
         painter.setPen(QPen(track if self._checked else QColor("#315365"), 1))
         painter.setBrush(track)
         painter.drawRoundedRect(1, 3, 40, 18, 9, 9)
