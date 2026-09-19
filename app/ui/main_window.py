@@ -1636,7 +1636,8 @@ class MainWindow(QMainWindow):
             self._append_log("状态检查进行中，请稍后再同步。")
             return
         self._set_sync_busy(True)
-        self._show_busy_dialog("正在提交并同步全部 Git 渠道" if commit_message else "正在同步全部 Git 渠道")
+        if not self._tray_sync_requested:
+            self._show_busy_dialog("正在提交并同步全部 Git 渠道" if commit_message else "正在同步全部 Git 渠道")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self._set_progress_style("running")
