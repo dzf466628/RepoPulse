@@ -1,10 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
+from pathlib import Path
+
+
+qt_bin = Path(sys.prefix) / 'Lib' / 'site-packages' / 'PyQt6' / 'Qt6' / 'bin'
+qt_runtime_names = (
+    'Qt6Core.dll', 'Qt6Gui.dll', 'Qt6Network.dll', 'Qt6Pdf.dll', 'Qt6Svg.dll', 'Qt6Widgets.dll',
+    'MSVCP140.dll', 'MSVCP140_1.dll', 'MSVCP140_2.dll', 'VCRUNTIME140.dll', 'VCRUNTIME140_1.dll',
+    'concrt140.dll', 'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140_threads.dll',
+    'vccorlib140.dll', 'opengl32sw.dll',
+)
+qt_binaries = [(str(qt_bin / name), 'PyQt6') for name in qt_runtime_names if (qt_bin / name).is_file()]
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=qt_binaries,
     datas=[('RepoPulse.png', '.')],
     hiddenimports=[],
     hookspath=[],

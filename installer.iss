@@ -9,7 +9,7 @@ AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL=https://github.com/dzf466628/RepoPulse
-DefaultDirName={localappdata}\Programs\RepoPulse
+DefaultDirName={code:GetDefaultDir}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=dist
@@ -25,6 +25,18 @@ VersionInfoVersion={#AppVersion}.0
 VersionInfoProductVersion={#AppVersion}
 VersionInfoDescription=RepoPulse Git 状态管理工具安装程序
 VersionInfoProductName={#AppName}
+
+[Code]
+function GetDefaultDir(Param: String): String;
+begin
+  if DirExists('D:\') then
+    Result := 'D:\RepoPulse'
+  else
+    Result := ExpandConstant('{localappdata}\Programs\RepoPulse');
+end;
+
+[Languages]
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 
 [Files]
 Source: "dist\RepoPulse\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
