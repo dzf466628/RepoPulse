@@ -8,10 +8,15 @@ from pathlib import Path
 # Register that directory before importing any Qt extension modules.
 if sys.platform == "win32" and getattr(sys, "frozen", False):
     _bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    _qt_bin = _bundle_root / "PyQt6" / "Qt6" / "bin"
-    if _qt_bin.is_dir():
-        _qt_dll_handle = os.add_dll_directory(str(_qt_bin))
-        os.environ["PATH"] = os.pathsep.join((str(_qt_bin), os.environ.get("PATH", "")))
+    _qt_dirs = (_bundle_root / "PyQt6", _bundle_root / "PyQt6" / "Qt6" / "bin")
+    _qt_dll_handles = [
+        os.add_dll_directory(str(qt_dir))
+        for qt_dir in _qt_dirs
+        if qt_dir.is_dir()
+    ]
+    os.environ["PATH"] = os.pathsep.join(
+        (*(str(qt_dir) for qt_dir in _qt_dirs if qt_dir.is_dir()), os.environ.get("PATH", ""))
+    )
 
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication

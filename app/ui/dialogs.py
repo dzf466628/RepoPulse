@@ -592,7 +592,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
         title = QLabel("关于 RepoPulse")
         title.setStyleSheet("font-size: 17px; font-weight: 700; color: #F4F7FB;")
-        version = QLabel("Git 状态台 · v0.2.0")
+        version = QLabel("Git 状态台 · v0.2.1")
         layout.addWidget(title)
         layout.addWidget(version)
         layout.addStretch(1)
