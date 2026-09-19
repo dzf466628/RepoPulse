@@ -489,6 +489,9 @@ class MainWindow(QMainWindow):
         if not self.app_icon.isNull():
             self.setWindowIcon(self.app_icon)
         self.tray_icon: QSystemTrayIcon | None = None
+        self.tray_sync_action: QAction | None = None
+        self._tray_sync_requested = False
+        self._auto_sync_had_error = False
         self._allow_close = False
         self._setup_tray()
         set_dark_title_bar(self)
@@ -524,14 +527,37 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         show_action = QAction("显示 RepoPulse", self)
         show_action.triggered.connect(self._show_from_tray)
+        self.tray_sync_action = QAction("提交并同步", self)
+        self.tray_sync_action.triggered.connect(self._tray_sync_all)
         exit_action = QAction("退出软件", self)
         exit_action.triggered.connect(self._exit_from_tray)
         menu.addAction(show_action)
+        menu.addAction(self.tray_sync_action)
         menu.addSeparator()
         menu.addAction(exit_action)
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.activated.connect(self._tray_activated)
         self.tray_icon.show()
+
+    def _tray_sync_all(self) -> None:
+        enabled_projects = [project for project in self.projects if project.sync_enabled]
+        if not enabled_projects:
+            self._show_tray_message("没有开启的项目", "请先打开项目列表右侧的同步开关。", QSystemTrayIcon.MessageIcon.Warning)
+            return
+        if self.auto_sync_queue or (self.sync_worker and self.sync_worker.isRunning()):
+            self._show_tray_message("提交并同步进行中", "当前已有同步任务正在处理。", QSystemTrayIcon.MessageIcon.Information)
+            return
+        self._tray_sync_requested = True
+        self._queue_automatic_sync(enabled_projects, "托盘同步")
+
+    def _show_tray_message(
+        self,
+        title: str,
+        message: str,
+        icon: QSystemTrayIcon.MessageIcon = QSystemTrayIcon.MessageIcon.Information,
+    ) -> None:
+        if self.tray_icon is not None:
+            self.tray_icon.showMessage(title, message, icon, 3500)
 
     def _show_from_tray(self) -> None:
         self.show()
@@ -1593,11 +1619,15 @@ class MainWindow(QMainWindow):
         for button in self.quick_buttons:
             button.setEnabled(not busy)
         self.settings_button.setEnabled(not busy)
+        if self.tray_sync_action is not None:
+            self.tray_sync_action.setEnabled(not busy)
 
     def _set_create_busy(self, busy: bool) -> None:
         for button in self.quick_buttons:
             button.setEnabled(not busy)
         self.settings_button.setEnabled(not busy)
+        if self.tray_sync_action is not None:
+            self.tray_sync_action.setEnabled(not busy)
 
     def _start_sync(self, project: ProjectConfig, commit_message: str = "", automatic: bool = False) -> None:
         if self.sync_worker and self.sync_worker.isRunning():
@@ -1822,6 +1852,7 @@ class MainWindow(QMainWindow):
         if not self.auto_sync_queue:
             return
         self.auto_sync_reason = reason
+        self._auto_sync_had_error = False
         self._start_next_automatic_sync()
 
     def _start_next_automatic_sync(self) -> None:
