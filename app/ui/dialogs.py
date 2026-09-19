@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 from app.core.git_service import GitCommandError, GitService
 from app.models import ProjectConfig, RemoteConfig
-from app.ui.theme import ACCENT_COLOR, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
+from app.ui.theme import ACCENT_COLOR, ACCENT_DARK, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
 
 
 GIT_TYPES = [
@@ -434,6 +434,20 @@ class SettingsDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
+        layout.setSpacing(SPACE_2)
+        page.setStyleSheet(
+            f"""
+            QCheckBox {{ color: #E8ECF2; spacing: 8px; padding: 3px 0; }}
+            QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid #3D6475; background: #0A2231; }}
+            QCheckBox::indicator:hover {{ border-color: {ACCENT_COLOR}; background: #123D4D; }}
+            QCheckBox::indicator:checked {{ border-color: {ACCENT_COLOR}; background: {ACCENT_COLOR}; }}
+            QSpinBox {{ color: #F4F7FB; background: #0A2231; border: 1px solid #315365; border-radius: 6px; padding: 2px 24px 2px 8px; min-height: 28px; max-height: 28px; }}
+            QSpinBox:hover {{ border-color: {ACCENT_COLOR}; }}
+            QSpinBox:focus {{ border-color: {ACCENT_COLOR}; }}
+            QSpinBox::up-button, QSpinBox::down-button {{ width: 18px; border: 0; background: #123D4D; }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {ACCENT_DARK}; }}
+            """
+        )
         title = QLabel("同步设置")
         title.setStyleSheet("font-size: 17px; font-weight: 700; color: #F4F7FB;")
         layout.addWidget(title)
@@ -454,6 +468,9 @@ class SettingsDialog(QDialog):
         self.scheduled_minutes.setRange(0, 59)
         self.scheduled_seconds = QSpinBox()
         self.scheduled_seconds.setRange(1, 59)
+        for spin in (self.scheduled_hours, self.scheduled_minutes, self.scheduled_seconds):
+            spin.setFixedWidth(58)
+            spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.scheduled_hours.setValue(settings.value("scheduled_sync_hours", 0, type=int))
         self.scheduled_minutes.setValue(settings.value("scheduled_sync_minutes", 0, type=int))
         self.scheduled_seconds.setValue(settings.value("scheduled_sync_seconds", 30, type=int))
@@ -473,9 +490,12 @@ class SettingsDialog(QDialog):
         self.leading_threshold = QSpinBox()
         self.leading_threshold.setRange(1, 9999)
         self.leading_threshold.setValue(settings.value("leading_sync_threshold", 1, type=int))
+        self.leading_threshold.setFixedWidth(72)
+        self.leading_threshold.setAlignment(Qt.AlignmentFlag.AlignCenter)
         leading_row = QHBoxLayout()
         leading_row.setContentsMargins(0, 0, 0, 0)
-        leading_row.addWidget(self.leading_check)
+        leading_row.setSpacing(SPACE_1)
+        leading_row.addSpacing(26)
         leading_row.addWidget(QLabel("本地领先"))
         leading_row.addWidget(self.leading_threshold)
         leading_row.addWidget(QLabel("步时自动同步"))
@@ -499,6 +519,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.ignore_github_check)
         layout.addWidget(self.scheduled_check)
         layout.addLayout(interval)
+        layout.addWidget(self.leading_check)
         layout.addLayout(leading_row)
         layout.addStretch(1)
         return page

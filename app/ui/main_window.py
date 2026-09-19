@@ -346,6 +346,26 @@ class ProjectListWidget(QListWidget):
         super().leaveEvent(event)
 
 
+class CapsuleSwitch(QWidget):
+    """项目行右侧的静态开关外观，交互功能留待后续接入。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(42, 24)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#315365"), 1))
+        painter.setBrush(QColor("#163546"))
+        painter.drawRoundedRect(1, 3, 40, 18, 9, 9)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#A9B8C4"))
+        painter.drawEllipse(4, 6, 12, 12)
+        painter.end()
+
+
 class ProjectListDelegate(QStyledItemDelegate):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -855,8 +875,9 @@ class MainWindow(QMainWindow):
             f"background: {colors.get(state, colors['waiting'])}; border-radius: 6px;"
         )
         layout.addWidget(icon_slot)
-        layout.addWidget(name, 1)
         layout.addWidget(status)
+        layout.addWidget(name, 1)
+        layout.addWidget(CapsuleSwitch(content))
         separator = QFrame()
         separator.setFixedHeight(1)
         separator.setStyleSheet(f"background: {BORDER_COLOR}; border: 0; margin: 0;")
