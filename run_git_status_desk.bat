@@ -2,6 +2,7 @@
 setlocal EnableExtensions
 
 cd /d "%~dp0"
+set "APP_DIR=%~dp0"
 
 set "PYTHON_EXE="
 set "PYTHON_ARGS="
@@ -39,7 +40,7 @@ if errorlevel 1 (
 )
 
 echo [INFO] Starting RepoPulse...
-"%PYTHON_EXE%" %PYTHON_ARGS% main.py
+"%PYTHON_EXE%" %PYTHON_ARGS% "%APP_DIR%main.py"
 if errorlevel 1 (
     echo.
     echo [ERROR] The application exited with an error.

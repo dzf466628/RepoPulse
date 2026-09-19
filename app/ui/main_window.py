@@ -74,7 +74,7 @@ def _settings_icon() -> QIcon:
 
 
 class OutlinedLabel(QLabel):
-    """用多次文字绘制模拟外描边，不增加标题容器边框。"""
+    """绘制渠道卡片标题文字，不增加额外容器边框。"""
 
     def paintEvent(self, event) -> None:  # noqa: N802 - Qt API
         painter = QPainter(self)
@@ -86,11 +86,6 @@ class OutlinedLabel(QLabel):
         painter.setFont(font)
         text_rect = self.rect().adjusted(2, 0, -2, 0)
         flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-        # Draw a thin blue halo around the glyphs, then paint the face on top.
-        outline_pen = QPen(QColor(ACCENT_COLOR), 1.0)
-        painter.setPen(outline_pen)
-        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            painter.drawText(text_rect.translated(dx, dy), flags, text)
         painter.setPen(QPen(QColor("#F4F7FB"), 1.0))
         painter.drawText(text_rect, flags, text)
         painter.end()
@@ -428,8 +423,13 @@ class MainWindow(QMainWindow):
         self.selected_git_key: str | None = None
         self.log_history: list[str] = []
         self.busy_dialog: BusyDialog | None = None
+        self.auto_sync_queue: list[ProjectConfig] = []
+        self.auto_sync_reason = ""
+        self.auto_sync_timer = QTimer(self)
+        self.auto_sync_timer.timeout.connect(self._run_scheduled_sync)
         self._build_ui()
         self._reload_project_list()
+        self._apply_sync_settings()
         QTimer.singleShot(250, self.refresh_all)
 
     def _setup_tray(self) -> None:
@@ -675,7 +675,9 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(action_frame)
 
         splitter.addWidget(right)
-        splitter.setSizes([240, 760])
+        # Keep the project pane 70px wider than the original proportion while
+        # preserving the fixed 900px window and squeezing the right panes.
+        splitter.setSizes([350, 650])
         root.addWidget(splitter, 1)
 
         info_bar = QFrame()
@@ -1017,7 +1019,7 @@ class MainWindow(QMainWindow):
         remotes = result.get("remotes", {})
         if local.get("error"):
             return "error"
-        if any(remote.get("error") for remote in remotes.values()):
+        if any(remote.get("error") and not remote.get("ignored") for remote in remotes.values()):
             return "error"
         relations = [str(remote.get("relation") or "") for remote in remotes.values()]
         if any(
@@ -1209,6 +1211,8 @@ class MainWindow(QMainWindow):
         }.get(remote.kind, "其他远程 Git 仓库和同步状态")
         if not data:
             return StatusCard(key, title, subtitle, "等待检查", "#A9B5C8", "未检查")
+        if data.get("ignored") and remote.kind == "github":
+            return StatusCard(key, title, subtitle, "未代理", "#A9B5C8", "GitHub 连接失败，已按设置忽略")
         if data.get("error"):
             return StatusCard(key, title, subtitle, "连接失败", "#F27788", data["error"])
         if remote.kind == "local":
@@ -1487,7 +1491,7 @@ class MainWindow(QMainWindow):
             button.setEnabled(not busy)
         self.settings_button.setEnabled(not busy)
 
-    def _start_sync(self, project: ProjectConfig, commit_message: str = "") -> None:
+    def _start_sync(self, project: ProjectConfig, commit_message: str = "", automatic: bool = False) -> None:
         if self.sync_worker and self.sync_worker.isRunning():
             return
         if self.worker and self.worker.isRunning():
@@ -1500,7 +1504,8 @@ class MainWindow(QMainWindow):
         self._set_progress_style("running")
         self._append_log(f"开始提交并同步：{project.name}" if commit_message else f"开始同步：{project.name}")
         self._sync_had_error = False
-        self.sync_worker = SyncWorker(project, commit_message=commit_message)
+        values = self._sync_settings()
+        self.sync_worker = SyncWorker(project, commit_message=commit_message, full_sync=bool(values["full_sync"]))
         self.sync_worker.log_message.connect(self._append_log)
         self.sync_worker.progress_changed.connect(self._on_progress_changed)
         self.sync_worker.result_ready.connect(self._on_sync_result)
@@ -1525,6 +1530,8 @@ class MainWindow(QMainWindow):
         self._set_progress_style("error" if getattr(self, "_sync_had_error", False) else "success")
         self._append_log("同步完成。" if not getattr(self, "_sync_had_error", False) else "同步结束，部分渠道失败。")
         self.refresh_selected()
+        if self.auto_sync_queue:
+            QTimer.singleShot(0, self._start_next_automatic_sync)
 
     def _new_project(self) -> None:
         if not self.remotes:
@@ -1665,7 +1672,64 @@ class MainWindow(QMainWindow):
     def open_settings(self) -> None:
         dialog = SettingsDialog(self)
         dialog.add_git_requested.connect(lambda git_dialog: self._submit_settings_git(dialog, git_dialog))
+        dialog.settings_changed.connect(self._apply_sync_settings)
         dialog.exec()
+
+    @staticmethod
+    def _sync_settings() -> dict[str, object]:
+        try:
+            settings = QSettings("RepoPulse", "RepoPulse")
+            return {
+                "full_sync": settings.value("sync_full_files", False, type=bool),
+                "ignore_github": settings.value("ignore_github_failure", False, type=bool),
+                "scheduled": settings.value("scheduled_sync_enabled", False, type=bool),
+                "hours": settings.value("scheduled_sync_hours", 0, type=int),
+                "minutes": settings.value("scheduled_sync_minutes", 0, type=int),
+                "seconds": settings.value("scheduled_sync_seconds", 30, type=int),
+                "leading": settings.value("leading_sync_enabled", False, type=bool),
+                "threshold": settings.value("leading_sync_threshold", 1, type=int),
+            }
+        except Exception:
+            return {"full_sync": False, "ignore_github": False, "scheduled": False, "hours": 0, "minutes": 0, "seconds": 30, "leading": False, "threshold": 1}
+
+    def _apply_sync_settings(self) -> None:
+        values = self._sync_settings()
+        if not values["scheduled"]:
+            self.auto_sync_timer.stop()
+            return
+        interval_ms = (
+            int(values["hours"]) * 3600
+            + int(values["minutes"]) * 60
+            + int(values["seconds"])
+        ) * 1000
+        self.auto_sync_timer.start(max(1000, interval_ms))
+
+    def _run_scheduled_sync(self) -> None:
+        self._queue_automatic_sync(self.projects, "定时同步")
+
+    def _queue_automatic_sync(self, projects: list[ProjectConfig], reason: str) -> None:
+        if self.auto_sync_queue or (self.sync_worker and self.sync_worker.isRunning()):
+            return
+        self.auto_sync_queue = list(projects)
+        self.auto_sync_reason = reason
+        self._start_next_automatic_sync()
+
+    def _start_next_automatic_sync(self) -> None:
+        if not self.auto_sync_queue:
+            self.auto_sync_reason = ""
+            return
+        if self.worker and self.worker.isRunning():
+            return
+        if self.sync_worker and self.sync_worker.isRunning():
+            return
+        project = self.auto_sync_queue.pop(0)
+        if not project.workspace_path or not project.remotes:
+            self._start_next_automatic_sync()
+            return
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        message = f"{self.auto_sync_reason} {timestamp}"
+        self._append_log(f"开始{self.auto_sync_reason}：{project.name}")
+        self._start_sync(project, message, automatic=True)
 
     def _submit_settings_git(self, settings_dialog: SettingsDialog, git_dialog: GitDialog) -> None:
         settings_dialog.close()
@@ -1694,7 +1758,8 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("%p%")
         self._set_progress_style("running")
         self._append_log("开始刷新状态……")
-        self.worker = StatusWorker(projects)
+        values = self._sync_settings()
+        self.worker = StatusWorker(projects, ignore_github_failure=bool(values["ignore_github"]))
         self.worker.project_ready.connect(self._on_project_ready)
         self.worker.log_message.connect(self._append_log)
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -1708,17 +1773,34 @@ class MainWindow(QMainWindow):
         self._reload_project_list(select_id=selected.project_id if selected else project_id)
         if selected and selected.project_id == project_id:
             self._render_cards(result)
+        self._check_leading_sync(result)
+
+    def _check_leading_sync(self, result: dict) -> None:
+        values = self._sync_settings()
+        if not values["leading"]:
+            return
+        threshold = max(1, int(values["threshold"]))
+        project = next((item for item in self.projects if item.project_id == result.get("project_id")), None)
+        if not project:
+            return
+        if any(
+            remote.get("kind") == "local" and int(remote.get("ahead") or 0) >= threshold
+            for remote in result.get("remotes", {}).values()
+        ):
+            self._queue_automatic_sync([project], "检测同步")
 
     def _on_refresh_completed(self) -> None:
         self._set_busy(False)
         self._hide_busy_dialog()
         has_error = any(
             result.get("local", {}).get("error")
-            or any(remote.get("error") for remote in result.get("remotes", {}).values())
+            or any(remote.get("error") and not remote.get("ignored") for remote in result.get("remotes", {}).values())
             for result in self.results.values()
         )
         self._set_progress_style("error" if has_error else "success")
         self._append_log("刷新完成。")
+        if self.auto_sync_queue:
+            QTimer.singleShot(0, self._start_next_automatic_sync)
 
     def add_git(self, dialog: GitDialog | None = None) -> None:
         if dialog is None:

@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSpinBox,
     QStackedWidget,
     QTextBrowser,
     QVBoxLayout,
@@ -355,6 +356,7 @@ class SettingsDialog(QDialog):
     """同步设置弹窗：左侧导航，右侧内容。"""
 
     add_git_requested = pyqtSignal(object)
+    settings_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -434,11 +436,88 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
         title = QLabel("同步设置")
         title.setStyleSheet("font-size: 17px; font-weight: 700; color: #F4F7FB;")
-        theme = QLabel("深色主题")
         layout.addWidget(title)
-        layout.addWidget(theme)
+
+        settings = QSettings("RepoPulse", "RepoPulse")
+        self.full_sync_check = QCheckBox("本地 Git / NAS Git 全量同步")
+        self.full_sync_check.setChecked(settings.value("sync_full_files", False, type=bool))
+        self.full_sync_check.setToolTip("同步本地 Git 和 NAS Git 时完整对齐文件")
+        self.ignore_github_check = QCheckBox("GitHub 连接失败自动忽略")
+        self.ignore_github_check.setChecked(settings.value("ignore_github_failure", False, type=bool))
+        self.ignore_github_check.setToolTip("GitHub 不可用时显示“未代理”，不影响其他渠道状态")
+
+        self.scheduled_check = QCheckBox("开启定时同步")
+        self.scheduled_check.setChecked(settings.value("scheduled_sync_enabled", False, type=bool))
+        self.scheduled_hours = QSpinBox()
+        self.scheduled_hours.setRange(0, 23)
+        self.scheduled_minutes = QSpinBox()
+        self.scheduled_minutes.setRange(0, 59)
+        self.scheduled_seconds = QSpinBox()
+        self.scheduled_seconds.setRange(1, 59)
+        self.scheduled_hours.setValue(settings.value("scheduled_sync_hours", 0, type=int))
+        self.scheduled_minutes.setValue(settings.value("scheduled_sync_minutes", 0, type=int))
+        self.scheduled_seconds.setValue(settings.value("scheduled_sync_seconds", 30, type=int))
+        interval = QHBoxLayout()
+        interval.setContentsMargins(0, 0, 0, 0)
+        interval.addWidget(QLabel("每"))
+        interval.addWidget(self.scheduled_hours)
+        interval.addWidget(QLabel("时"))
+        interval.addWidget(self.scheduled_minutes)
+        interval.addWidget(QLabel("分"))
+        interval.addWidget(self.scheduled_seconds)
+        interval.addWidget(QLabel("秒"))
+        interval.addStretch(1)
+
+        self.leading_check = QCheckBox("开启修改同步")
+        self.leading_check.setChecked(settings.value("leading_sync_enabled", False, type=bool))
+        self.leading_threshold = QSpinBox()
+        self.leading_threshold.setRange(1, 9999)
+        self.leading_threshold.setValue(settings.value("leading_sync_threshold", 1, type=int))
+        leading_row = QHBoxLayout()
+        leading_row.setContentsMargins(0, 0, 0, 0)
+        leading_row.addWidget(self.leading_check)
+        leading_row.addWidget(QLabel("本地领先"))
+        leading_row.addWidget(self.leading_threshold)
+        leading_row.addWidget(QLabel("步时自动同步"))
+        leading_row.addStretch(1)
+
+        for widget in (
+            self.full_sync_check,
+            self.ignore_github_check,
+            self.scheduled_check,
+            self.scheduled_hours,
+            self.scheduled_minutes,
+            self.scheduled_seconds,
+            self.leading_check,
+            self.leading_threshold,
+        ):
+            if isinstance(widget, QCheckBox):
+                widget.toggled.connect(self._save_sync_settings)
+            else:
+                widget.valueChanged.connect(self._save_sync_settings)
+        layout.addWidget(self.full_sync_check)
+        layout.addWidget(self.ignore_github_check)
+        layout.addWidget(self.scheduled_check)
+        layout.addLayout(interval)
+        layout.addLayout(leading_row)
         layout.addStretch(1)
         return page
+
+    def _save_sync_settings(self) -> None:
+        try:
+            settings = QSettings("RepoPulse", "RepoPulse")
+            settings.setValue("sync_full_files", self.full_sync_check.isChecked())
+            settings.setValue("ignore_github_failure", self.ignore_github_check.isChecked())
+            settings.setValue("scheduled_sync_enabled", self.scheduled_check.isChecked())
+            settings.setValue("scheduled_sync_hours", self.scheduled_hours.value())
+            settings.setValue("scheduled_sync_minutes", self.scheduled_minutes.value())
+            settings.setValue("scheduled_sync_seconds", self.scheduled_seconds.value())
+            settings.setValue("leading_sync_enabled", self.leading_check.isChecked())
+            settings.setValue("leading_sync_threshold", self.leading_threshold.value())
+            settings.sync()
+        except Exception:
+            pass
+        self.settings_changed.emit()
 
     def _build_software_page(self) -> QWidget:
         page = QWidget()
@@ -514,9 +593,7 @@ class ProjectDialog(QDialog):
         self.existing_check.setToolTip("直接读取已有项目目录，不创建新文件夹")
         self.existing_check.stateChanged.connect(self._sync_existing_mode)
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("例如：SpriteSheetTool")
         self.workspace_edit = QLineEdit()
-        self.workspace_edit.setPlaceholderText("例如：C:/Users/dudu/Desktop（项目文件夹会在这里创建）")
         browse = QPushButton("选择目录")
         self.browse_button = browse
         browse.clicked.connect(self._browse_workspace)
@@ -542,11 +619,6 @@ class ProjectDialog(QDialog):
 
     def _sync_existing_mode(self) -> None:
         existing = self.existing_check.isChecked()
-        self.workspace_edit.setPlaceholderText(
-            "选择已有项目目录"
-            if existing
-            else "例如：C:/Users/dudu/Desktop（项目文件夹会在这里创建）"
-        )
         self.browse_button.setText("选择项目" if existing else "选择目录")
 
     def _browse_workspace(self) -> None:
@@ -606,9 +678,7 @@ class GitDialog(QDialog):
         self.type_combo.currentIndexChanged.connect(self._sync_type)
 
         self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("例如：Local Git、NAS 备份、GitHub 主仓库")
         self.location_edit = QLineEdit()
-        self.location_edit.setPlaceholderText("选择本地 Git 仓库目录")
         self.browse_button = QPushButton("选择目录")
         self.browse_button.clicked.connect(self._browse_location)
         location_row = QHBoxLayout()
@@ -616,12 +686,10 @@ class GitDialog(QDialog):
         location_row.addWidget(self.location_edit)
         location_row.addWidget(self.browse_button)
         self.location_label = QLabel("本地渠道目录")
-        self.nas_ip_label = QLabel("NAS IP")
+        self.nas_ip_label = QLabel("NAS 地址")
         self.nas_ip_edit = QLineEdit()
-        self.nas_ip_edit.setPlaceholderText("例如 192.168.1.100")
         self.nas_port_label = QLabel("端口")
         self.nas_port_edit = QLineEdit()
-        self.nas_port_edit.setPlaceholderText("例如 3003")
         self.nas_port_edit.setMaximumWidth(110)
         nas_row = QHBoxLayout()
         nas_row.setContentsMargins(0, 0, 0, 0)
@@ -666,11 +734,6 @@ class GitDialog(QDialog):
         is_github = kind == "github"
         is_nas = kind == "nas"
         self.location_label.setText("本地仓库或集合" if is_local else "服务地址")
-        self.location_edit.setPlaceholderText(
-            "例如 E:/git 或 E:/git/SpriteSheetTool"
-            if is_local
-            else "例如 http://192.168.1.100:3003"
-        )
         self.browse_button.setVisible(is_local)
         self.location_label.setVisible(not is_github)
         self.location_edit.setVisible(not is_github)
@@ -733,14 +796,19 @@ class GitDialog(QDialog):
                 return
         if kind == "nas":
             if not self.nas_ip_edit.text().strip():
-                QMessageBox.warning(self, "信息不完整", "请填写 NAS IP 地址。")
+                QMessageBox.warning(self, "信息不完整", "请填写 NAS 地址。")
                 return
             try:
-                port = int(self.nas_port_edit.text().strip())
+                raw_address = self.nas_ip_edit.text().strip()
+                parsed = urlparse(raw_address if "://" in raw_address else f"http://{raw_address}")
+                if not parsed.hostname:
+                    raise ValueError
+                port_text = self.nas_port_edit.text().strip()
+                port = int(port_text or parsed.port or 3003)
                 if not 1 <= port <= 65535:
                     raise ValueError
             except ValueError:
-                QMessageBox.warning(self, "端口不正确", "NAS 端口必须是 1 到 65535 之间的数字。")
+                QMessageBox.warning(self, "地址或端口不正确", "请输入有效的 NAS 地址和端口。")
                 return
         if kind not in {"local"} and not self.account_edit.text().strip():
             QMessageBox.warning(self, "信息不完整", "请填写账号或用户名。")
@@ -767,8 +835,8 @@ class GitDialog(QDialog):
         kind = str(self.type_combo.currentData())
         location = self.location_edit.text().strip()
         is_service = kind in {"github", "nas", "gitea"}
-        nas_ip = self.nas_ip_edit.text().strip()
-        nas_port = self.nas_port_edit.text().strip() or "3003"
+        nas_port_text = self.nas_port_edit.text().strip()
+        nas_port = int(nas_port_text) if nas_port_text else None
         return RemoteConfig(
             kind=kind,
             path=location if kind == "local" else "",
@@ -776,7 +844,7 @@ class GitDialog(QDialog):
             service_url=(
                 "https://github.com"
                 if kind == "github"
-                else f"http://{nas_ip}:{nas_port}"
+                else self._nas_service_url(nas_port)
                 if kind == "nas"
                 else location
                 if is_service
@@ -789,3 +857,17 @@ class GitDialog(QDialog):
             enabled=True,
             label=self.name_edit.text().strip(),
         )
+
+    def _nas_service_url(self, port: int | None = None) -> str:
+        """Normalize a NAS host, domain, or URL into the Gitea service root."""
+        raw_address = self.nas_ip_edit.text().strip().rstrip("/")
+        if not raw_address:
+            return ""
+        parsed = urlparse(raw_address if "://" in raw_address else f"http://{raw_address}")
+        host = parsed.hostname or ""
+        if not host:
+            return ""
+        effective_port = port or parsed.port or 3003
+        scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "http"
+        display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        return f"{scheme}://{display_host}:{effective_port}"

@@ -705,18 +705,32 @@ class GitService:
             result["relation"] = "连接失败"
         return result
 
-    def inspect_project(self, project: ProjectConfig, progress: Callable[[], None] | None = None) -> dict:
+    def inspect_project(
+        self,
+        project: ProjectConfig,
+        progress: Callable[[], None] | None = None,
+        ignore_github_failure: bool = False,
+    ) -> dict:
         local = self.local_status(project)
         if progress:
             progress()
         remotes = {}
         for key, remote in project.remotes.items():
             remotes[key] = self.remote_status(project, remote, local, key)
+            if ignore_github_failure and remote.kind == "github" and remotes[key].get("error"):
+                remotes[key]["relation"] = "未代理"
+                remotes[key]["online"] = False
+                remotes[key]["ignored"] = True
             if progress:
                 progress()
         return {"project_id": project.project_id, "local": local, "remotes": remotes}
 
-    def sync_project(self, project: ProjectConfig, progress: Callable[[], None] | None = None) -> dict:
+    def sync_project(
+        self,
+        project: ProjectConfig,
+        progress: Callable[[], None] | None = None,
+        full_sync: bool = False,
+    ) -> dict:
         """将当前项目的已提交内容同步到每个已配置 Git 渠道。
 
         同步只处理已提交的 HEAD，不会自动提交工作区改动；本地渠道通过
@@ -741,10 +755,10 @@ class GitService:
             label = remote.label or remote.kind
             try:
                 if remote.kind == "local":
-                    result = self._sync_local_channel(source, branch, remote, project, label)
+                    result = self._sync_local_channel(source, branch, remote, project, label, full_sync=full_sync)
                 else:
                     target_url = remote.url or self.repository_url_for_project(remote, project.name)
-                    result = self._sync_remote_channel(source, branch, remote, target_url, label)
+                    result = self._sync_remote_channel(source, branch, remote, target_url, label, full_sync=full_sync)
             except GitCommandError as exc:
                 result = {"ok": False, "message": f"{label}：{exc}"}
             result["key"] = key
@@ -791,6 +805,7 @@ class GitService:
         remote: RemoteConfig,
         project: ProjectConfig,
         label: str,
+        full_sync: bool = False,
     ) -> dict:
         target = self.local_channel_path(remote, project) if remote.path else None
         if target is None or not str(target):
@@ -814,6 +829,8 @@ class GitService:
         self.log(f"同步 {label}：{target}")
         self._run(["fetch", "--quiet", str(source), branch], cwd=target, timeout=45)
         self._run(["checkout", "-B", branch, "FETCH_HEAD"], cwd=target, timeout=45)
+        if full_sync:
+            self._run(["clean", "-fdx"], cwd=target, timeout=45)
         return {"ok": True, "message": f"{label}：同步完成"}
 
     def _sync_remote_channel(
@@ -823,6 +840,7 @@ class GitService:
         remote: RemoteConfig,
         target_url: str,
         label: str,
+        full_sync: bool = False,
     ) -> dict:
         if not target_url:
             return {"ok": False, "message": f"{label}：未配置仓库地址"}
@@ -833,4 +851,6 @@ class GitService:
             timeout=90,
             extra_env=self._auth_env(remote),
         )
+        if full_sync:
+            self.log(f"{label}：已执行全量同步")
         return {"ok": True, "message": f"{label}：同步完成"}

@@ -13,9 +13,10 @@ class StatusWorker(QThread):
     completed = pyqtSignal()
     progress_changed = pyqtSignal(int, int)
 
-    def __init__(self, projects: list[ProjectConfig]):
+    def __init__(self, projects: list[ProjectConfig], ignore_github_failure: bool = False):
         super().__init__()
         self.projects = projects
+        self.ignore_github_failure = ignore_github_failure
 
     def run(self) -> None:
         try:
@@ -31,7 +32,11 @@ class StatusWorker(QThread):
 
             for project in self.projects:
                 self.log_message.emit(f"开始检查：{project.name}")
-                result = service.inspect_project(project, progress=mark_complete)
+                result = service.inspect_project(
+                    project,
+                    progress=mark_complete,
+                    ignore_github_failure=self.ignore_github_failure,
+                )
                 self.project_ready.emit(project.project_id, result)
                 self.log_message.emit(f"完成检查：{project.name}")
         except Exception as exc:  # pragma: no cover - 最后一道线程保护
@@ -47,10 +52,11 @@ class SyncWorker(QThread):
     completed = pyqtSignal()
     progress_changed = pyqtSignal(int, int)
 
-    def __init__(self, project: ProjectConfig, commit_message: str = ""):
+    def __init__(self, project: ProjectConfig, commit_message: str = "", full_sync: bool = False):
         super().__init__()
         self.project = project
         self.commit_message = commit_message
+        self.full_sync = full_sync
 
     def run(self) -> None:
         try:
@@ -73,7 +79,11 @@ class SyncWorker(QThread):
                 )
                 self.log_message.emit(commit_result["message"])
                 mark_complete()
-            result = service.sync_project(self.project, progress=mark_complete)
+            result = service.sync_project(
+                self.project,
+                progress=mark_complete,
+                full_sync=self.full_sync,
+            )
             self.result_ready.emit(result)
         except Exception as exc:  # pragma: no cover - 最后一道线程保护
             self.failed.emit(str(exc))
