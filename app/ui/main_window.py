@@ -1656,20 +1656,34 @@ class MainWindow(QMainWindow):
         for item in result.get("results", []):
             self._append_log(item.get("message", ""))
         self._sync_had_error = bool(failures)
+        if failures and self.auto_sync_reason:
+            self._auto_sync_had_error = True
 
     def _on_sync_failed(self, message: str) -> None:
         self._sync_had_error = True
+        if self.auto_sync_reason:
+            self._auto_sync_had_error = True
         self._hide_busy_dialog()
         self._append_log(f"同步失败：{message}")
 
     def _on_sync_completed(self) -> None:
-        self._set_sync_busy(False)
+        has_more = bool(self.auto_sync_queue)
+        overall_error = bool(getattr(self, "_sync_had_error", False) or self._auto_sync_had_error)
+        self._set_sync_busy(has_more)
         self._hide_busy_dialog()
-        self._set_progress_style("error" if getattr(self, "_sync_had_error", False) else "success")
-        self._append_log("同步完成。" if not getattr(self, "_sync_had_error", False) else "同步结束，部分渠道失败。")
+        self._set_progress_style("error" if overall_error else "success")
+        self._append_log("同步完成。" if not overall_error else "同步结束，部分渠道失败。")
         self.refresh_selected()
-        if self.auto_sync_queue:
+        if has_more:
             QTimer.singleShot(0, self._start_next_automatic_sync)
+            return
+        self._show_tray_message(
+            "提交并同步完成" if not overall_error else "提交并同步结束",
+            "全部开启项目已完成同步。" if not overall_error else "同步完成，但有渠道失败。",
+            QSystemTrayIcon.MessageIcon.Information if not overall_error else QSystemTrayIcon.MessageIcon.Warning,
+        )
+        self._tray_sync_requested = False
+        self._auto_sync_had_error = False
 
     def _new_project(self) -> None:
         if not self.remotes:
