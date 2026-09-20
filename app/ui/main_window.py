@@ -888,7 +888,7 @@ class MainWindow(QMainWindow):
         self.title_version.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         toolbar.addWidget(title_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         toolbar.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
-        toolbar.addWidget(self.title_version, 0, Qt.AlignmentFlag.AlignVCenter)
+        toolbar.addWidget(self.title_version, 0, Qt.AlignmentFlag.AlignBottom)
         toolbar.addStretch(1)
         self.dock_slot = DockSlot()
         self.dock_slot.set_occupied(True)
