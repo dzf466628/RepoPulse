@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import html
 import uuid
 import webbrowser
@@ -20,6 +21,7 @@ def _qobj_alive(obj) -> bool:
     except Exception:
         return False
 from PyQt6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -1236,6 +1238,21 @@ class MainWindow(QMainWindow):
             created_at = datetime.fromtimestamp(path.stat().st_ctime).strftime("%Y-%m-%d %H:%M")
         except OSError:
             created_at = "未知"
+        # 版本：当前分支 + 短 commit（非 git 仓库或失败则未知）
+        git_version = "未知"
+        try:
+            import subprocess as _sp
+            _flags = getattr(_sp, "CREATE_NO_WINDOW", 0)
+            _br = _sp.run(["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
+                          capture_output=True, text=True, timeout=5, creationflags=_flags)
+            _sh = _sp.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True, timeout=5, creationflags=_flags)
+            if _br.returncode == 0 and _sh.returncode == 0:
+                _branch = _br.stdout.strip() or "?"
+                _short = _sh.stdout.strip() or "?"
+                git_version = f"{_branch} · {_short}"
+        except Exception:
+            git_version = "未知"
 
         result = self.results.get(project.project_id) or {}
         remote_results = result.get("remotes", {})
@@ -1279,6 +1296,7 @@ class MainWindow(QMainWindow):
             "created_at": created_at,
             "file_count": file_count,
             "total_size": size_text,
+            "git_version": git_version,
             "git_summary_html": "<br>".join(summary_lines),
         }
 
@@ -1752,6 +1770,9 @@ class MainWindow(QMainWindow):
             _full = bool(self._sync_settings().get("full_sync", False))
             _show_full = _full and remote is not None and remote.kind == "local"
             _full_pixmap = render_state_pixmap("full", ACCENT_COLOR, 16) if _show_full else None
+            staging_stats = None
+            if key == "__staging__":
+                staging_stats = {**self._project_stats(project), "workspace_path": project.workspace_path}
             detail = RepositoryDetailDialog(
                 title=card.card_title,
                 status=card.card_status,
@@ -1762,6 +1783,7 @@ class MainWindow(QMainWindow):
                 repository_target=repository_target,
                 rename_enabled=key != "__staging__",
                 full_icon=_full_pixmap,
+                staging_stats=staging_stats,
                 parent=self,
             )
             detail.project_view_requested.connect(self._view_detail_project)
@@ -1769,6 +1791,11 @@ class MainWindow(QMainWindow):
             detail.open_repository_requested.connect(self._open_repository_target)
             detail.rename_requested.connect(lambda name: self._rename_card(key, name))
             detail.remove_repository_requested.connect(lambda: self._remove_repository_card(key, detail))
+            if key == "__staging__":
+                detail.view_project_requested.connect(lambda: self._open_repository_target(project.workspace_path))
+                detail.migrate_project_requested.connect(lambda: self._migrate_project(detail, project))
+                detail.rename_project_requested.connect(lambda: self._rename_project(detail, project))
+                detail.delete_project_requested.connect(lambda: self._delete_from_staging_detail(detail, project))
             detail.exec()
 
     def _detail_projects(
@@ -1836,6 +1863,44 @@ class MainWindow(QMainWindow):
             # The service account page is the repository entry point for NAS/Gitea.
             return f"{remote.service_url.rstrip('/')}/{quote(remote.username.strip(), safe='')}"
         return remote.url or remote.service_url or ""
+
+    def _migrate_project(self, dialog, project) -> None:
+        new_parent = QFileDialog.getExistingDirectory(
+            self, "选择新的项目所在目录", str(Path(project.workspace_path).parent)
+        )
+        if not new_parent:
+            return
+        new_path = Path(new_parent) / project.name
+        if new_path.exists():
+            QMessageBox.warning(self, "迁移", f"目标已存在同名目录：{new_path}")
+            return
+        try:
+            shutil.move(project.workspace_path, str(new_path))
+        except Exception as exc:
+            QMessageBox.warning(self, "迁移失败", str(exc))
+            return
+        project.workspace_path = str(new_path)
+        self.store.save(self.projects)
+        dialog.accept()
+        self._reload_project_list(select_id=project.project_id)
+        self._render_cards(None)
+        self._append_log(f"已迁移项目到：{new_path}")
+
+    def _rename_project(self, dialog, project) -> None:
+        name, ok = QInputDialog.getText(self, "重命名项目", "新项目名称：", text=project.name)
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        project.name = name
+        self.store.save(self.projects)
+        dialog.accept()
+        self._reload_project_list(select_id=project.project_id)
+        self._render_cards(None)
+        self._append_log(f"项目已重命名为：{name}")
+
+    def _delete_from_staging_detail(self, dialog, project) -> None:
+        dialog.accept()
+        self._delete_detail_project(project.project_id, "__staging__")
 
     def _view_detail_project(self, project_id: str, target: str) -> None:
         project = next((item for item in self.projects if item.project_id == project_id), None)

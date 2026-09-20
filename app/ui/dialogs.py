@@ -207,6 +207,11 @@ class RepositoryDetailDialog(QDialog):
     open_repository_requested = pyqtSignal(str)
     rename_requested = pyqtSignal(str)
     remove_repository_requested = pyqtSignal()
+    # 暂存区（项目本地信息）模式
+    view_project_requested = pyqtSignal()
+    migrate_project_requested = pyqtSignal()
+    rename_project_requested = pyqtSignal()
+    delete_project_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -219,10 +224,14 @@ class RepositoryDetailDialog(QDialog):
         repository_target: str = "",
         rename_enabled: bool = True,
         full_icon=None,
+        staging_stats: dict | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self.setWindowTitle(f"仓库详情 · {title}")
+        if staging_stats is not None:
+            self._build_staging_ui(title, status, status_color, full_icon, staging_stats, body, rich_body)
+            return
         self.setFixedSize(400, 600)
 
         self.title_label = DoubleClickLabel(title)
@@ -287,6 +296,105 @@ class RepositoryDetailDialog(QDialog):
         layout.addLayout(footer)
 
 
+
+    def _build_staging_ui(self, title, status, status_color, full_icon, stats: dict, body: str = "", rich_body: bool = False) -> None:
+        """暂存区卡片详情：保留原状态正文，再显示当前项目的本地信息。"""
+        self.setFixedSize(460, 460)
+        title_label = QLabel(title)
+        title_label.setStyleSheet("font-size: 19px; font-weight: 700; color: #F4F7FB;")
+        status_label = QLabel(status)
+        status_label.setStyleSheet(
+            f"color: {status_color}; font-weight: 700; background: {PANEL_RAISED}; padding: 2px 8px; border-radius: 6px;"
+        )
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.addWidget(title_label)
+        if full_icon is not None:
+            full_label = QLabel()
+            full_label.setPixmap(full_icon)
+            full_label.setToolTip("全量储存：含素材大文件一起存储")
+            header.addWidget(full_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addStretch(1)
+        header.addWidget(status_label)
+
+        detail = QTextBrowser()
+        detail.setOpenExternalLinks(False)
+        detail.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        detail.setMaximumHeight(96)
+        if rich_body:
+            detail.setHtml(body)
+        else:
+            detail.setPlainText(body)
+
+        info = QFrame()
+        info.setObjectName("stagingInfo")
+        info.setStyleSheet(
+            f"QFrame#stagingInfo {{ background: {PANEL_COLOR}; border: 1px solid {BORDER_COLOR}; border-radius: 5px; }}"
+        )
+        info_layout = QFormLayout(info)
+        info_layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
+        info_layout.setSpacing(SPACE_1)
+        for label, value in (
+            ("项目目录", str(stats.get("workspace_path") or "未知")),
+            ("总大小", str(stats.get("total_size") or "0 B")),
+            ("创建时间", str(stats.get("created_at") or "未知")),
+            ("文件数", f"{stats.get('file_count', 0)} 个"),
+            ("版本", str(stats.get("git_version") or "未知")),
+        ):
+            value_label = QLabel(value)
+            value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            value_label.setWordWrap(True)
+            info_layout.addRow(label, value_label)
+
+        view_button = QPushButton("查看")
+        view_button.setFixedHeight(30)
+        view_button.clicked.connect(self.view_project_requested.emit)
+        migrate_button = QPushButton("迁移")
+        migrate_button.setFixedHeight(30)
+        migrate_button.clicked.connect(self.migrate_project_requested.emit)
+        rename_button = QPushButton("重命名")
+        rename_button.setFixedHeight(30)
+        rename_button.clicked.connect(self.rename_project_requested.emit)
+        delete_button = QPushButton("删除")
+        delete_button.setFixedHeight(30)
+        delete_button.setStyleSheet(
+            "QPushButton { background: #7D3044; border-color: #A9435D; color: #FFE8EE; padding: 0 14px; }"
+            "QPushButton:hover { background: #A9435D; border-color: #F27788; }"
+            "QPushButton:pressed { background: #5D2434; }"
+        )
+        delete_button.clicked.connect(self._confirm_delete_project)
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(SPACE_1)
+        footer.addWidget(view_button)
+        footer.addWidget(migrate_button)
+        footer.addWidget(rename_button)
+        footer.addStretch(1)
+        footer.addWidget(delete_button)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(SPACE_4, SPACE_4, SPACE_4, SPACE_4)
+        layout.setSpacing(SPACE_2)
+        layout.addLayout(header)
+        layout.addWidget(detail)
+        layout.addWidget(info)
+        layout.addStretch(1)
+        layout.addLayout(footer)
+
+    def _confirm_delete_project(self) -> None:
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("确认删除项目")
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setText(
+            "确定删除这个项目吗？\n\n"
+            "仅从 RepoPulse 中移除该项目，不会删除本地工作区文件。"
+        )
+        yes = confirm.addButton("确认删除", QMessageBox.ButtonRole.DestructiveRole)
+        confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        confirm.setFixedHeight(160)
+        confirm.exec()
+        if confirm.clickedButton() is yes:
+            self.delete_project_requested.emit()
 
     def _request_rename(self) -> None:
         dialog = QInputDialog(self)
