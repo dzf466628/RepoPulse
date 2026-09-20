@@ -151,6 +151,7 @@ class ProgressRing(QWidget):
         self._prog_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._prog_anim.setDuration(260)
         self._prog_anim.valueChanged.connect(self._on_fill_value)
+        self._prog_anim.finished.connect(self._on_prog_done)
 
     # ------------------------------------------------------------ 对外 API
     def set_state(self, state_key: str, color: str, animate: bool = False) -> None:
@@ -210,8 +211,13 @@ class ProgressRing(QWidget):
             self.set_state(state_key, color, animate=(state_key == "clean"))
             return
         self._pending = (state_key, color)
-        if self._fill >= 1.0 and not self._fill_anim.state() == QVariantAnimation.State.Running:
+        filling = (
+            self._fill_anim.state() == QVariantAnimation.State.Running
+            or self._prog_anim.state() == QVariantAnimation.State.Running
+        )
+        if self._fill >= 1.0 and not filling:
             self._resolve()
+        # 否则等填充动画结束（_on_fill_done / _on_prog_done）再收尾
 
     def reset_to_state(self, state_key: str, color: str) -> None:
         """同步结束后由真实检查结果覆盖（不播动画）。"""
@@ -238,6 +244,13 @@ class ProgressRing(QWidget):
         elif self._spin_after_fill:
             self._phase = "spin"
             self._spin_anim.start()
+        self.update()
+
+    def _on_prog_done(self) -> None:
+        # 总环确定性填充到位：若结果已回来则立即收尾出符号
+        self._fill = 1.0
+        if self._pending is not None:
+            self._resolve()
         self.update()
 
     def _on_check_done(self) -> None:
@@ -470,10 +483,11 @@ class FloatingStatusWidget(QWidget):
         self.sync_btn.setFixedSize(40, 26)
         self.sync_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.sync_btn.setStyleSheet(
-            f"QPushButton {{ background: {ACCENT_COLOR}; color: #04222B; border: 0; border-radius: 4px; "
-            "font-size: 11px; font-weight: 700; padding: 0; min-height: 0; }}"
-            f"QPushButton:hover {{ background: #5AF3F3; }}"
-            f"QPushButton:disabled {{ background: #16323F; color: #5A6678; }}"
+            f"QPushButton {{ background-color: {ACCENT_COLOR}; color: #04222B; "
+            f"border: 1px solid #16E5EE; border-radius: 4px; "
+            f"font-size: 11px; font-weight: 700; padding: 0px; }}"
+            f"QPushButton:hover {{ background-color: #5AF3F3; border: 1px solid #5AF3F3; }}"
+            f"QPushButton:disabled {{ background-color: #16323F; color: #5A6678; border: 1px solid #16323F; }}"
         )
         self.sync_btn.clicked.connect(self.sync_clicked.emit)
 

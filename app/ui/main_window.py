@@ -10,7 +10,15 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from PyQt6.QtCore import QByteArray, QEvent, QPoint, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
-from shiboken6 import isValid as _qobj_alive
+from PyQt6 import sip
+
+
+def _qobj_alive(obj) -> bool:
+    """判断 PyQt6 包装的 C++ 对象是否仍存活（PyQt6 用 sip，不能用 shiboken6）。"""
+    try:
+        return obj is not None and not sip.isdeleted(obj)
+    except Exception:
+        return False
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -485,10 +493,14 @@ class CapsuleSwitch(QWidget):
         animation = getattr(self, "_hover_animation", None)
         if animation is None or not _qobj_alive(animation):
             return
-        animation.stop()
-        animation.setStartValue(self._hover_amount)
-        animation.setEndValue(1.0 if hovered else 0.0)
-        animation.start()
+        try:
+            animation.stop()
+            animation.setStartValue(self._hover_amount)
+            animation.setEndValue(1.0 if hovered else 0.0)
+            animation.start()
+        except RuntimeError:
+            # C++ 动画对象已被 Qt 销毁（列表刷新等），忽略本次 hover
+            self._hover_animation = None
 
     def _on_hover_value(self, value) -> None:
         self._hover_amount = float(value)
