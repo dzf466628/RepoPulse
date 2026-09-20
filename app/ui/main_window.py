@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from PyQt6.QtCore import QByteArray, QPoint, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
+from PyQt6.QtCore import QByteArray, QEvent, QPoint, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from shiboken6 import isValid as _qobj_alive
 from PyQt6.QtWidgets import (
@@ -43,7 +43,7 @@ from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
 from app.ui.dialogs import GitDialog, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog
-from app.ui.floating_widget import FloatingStatusWidget
+from app.ui.floating_widget import DockSlot, FloatingStatusWidget
 from PyQt6.QtSvg import QSvgRenderer
 from app.ui.theme import (
     ACCENT_COLOR,
@@ -189,6 +189,14 @@ STATE_SVG = {
         'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
         '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'
     ),
+    "full": (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+        'stroke="{color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">'
+        '<ellipse cx="12" cy="5" rx="8" ry="3"/>'
+        '<path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>'
+        '<path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/>'
+        '</svg>'
+    ),
 }
 
 STATE_COLORS = {
@@ -240,6 +248,7 @@ class StatusCard(QFrame):
         rich_body: bool = False,
         detail_body: str | None = None,
         recent_commit: str = "",
+        show_full: bool = False,
     ):
         super().__init__()
         self.card_key = key
@@ -260,7 +269,7 @@ class StatusCard(QFrame):
         self._click_timer.setInterval(240)
         self._click_timer.timeout.connect(lambda: self.clicked.emit(self.card_key))
         self.setObjectName("statusCard")
-        self.setFixedHeight(185)
+        self.setFixedHeight(175)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -295,6 +304,12 @@ class StatusCard(QFrame):
         title_label.setMinimumWidth(60)
         title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         header.addWidget(title_label, 1)
+        if show_full:
+            full_icon = QLabel()
+            full_icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            full_icon.setToolTip("全量储存")
+            full_icon.setPixmap(render_state_pixmap("full", ACCENT_COLOR, 14))
+            header.addWidget(full_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         header.addWidget(status_badge)
         layout.addLayout(header)
 
@@ -607,10 +622,70 @@ class MainWindow(QMainWindow):
         self._build_floating_widget()
         QTimer.singleShot(250, self.refresh_all)
 
+    def showEvent(self, event):  # noqa: N802 - Qt API
+        super().showEvent(event)
+        fw = getattr(self, "floating", None)
+        if fw is not None and fw.docked:
+            fw.show()
+            # 等布局完成、槽位坐标确定后再精确定位
+            QTimer.singleShot(0, fw.follow_main_window)
+
+    def hideEvent(self, event):  # noqa: N802 - Qt API
+        super().hideEvent(event)
+        # 吸附状态下跟随主窗口一起隐藏（最小化 / 缩到托盘）；脱离时不动悬浮窗
+        fw = getattr(self, "floating", None)
+        if fw is not None and fw.docked:
+            fw.hide()
+
+    def changeEvent(self, event):  # noqa: N802 - Qt API
+        super().changeEvent(event)
+        if event.type() != QEvent.Type.WindowStateChange:
+            return
+        fw = getattr(self, "floating", None)
+        if fw is None:
+            return
+        if self.isMinimized():
+            # 吸附时跟随最小化一起消失；脱离时悬浮窗独立置顶，不受影响
+            if fw.docked:
+                fw.hide()
+        elif fw.docked:
+            fw.show()
+            QTimer.singleShot(0, fw.follow_main_window)
+
     def _build_floating_widget(self) -> None:
         self.floating = FloatingStatusWidget(self)
-        self.floating.sync_clicked.connect(self._sync_current_project)
+        self.floating.sync_clicked.connect(self._sync_from_floating)
+        self.floating.project_clicked.connect(self._cycle_to_next_project)
         self.floating.show()
+        # 多个项目时每 20 秒轮播
+        self._floating_cycle_timer = QTimer(self)
+        self._floating_cycle_timer.setInterval(20000)
+        self._floating_cycle_timer.timeout.connect(self._cycle_to_next_project)
+        self._floating_cycle_timer.start()
+
+    def _on_floating_dock_changed(self, docked: bool) -> None:
+        if hasattr(self, "dock_slot"):
+            self.dock_slot.set_occupied(docked)
+
+    def _cycle_to_next_project(self) -> None:
+        enabled_rows = [i for i, p in enumerate(self.projects) if p.sync_enabled]
+        if len(enabled_rows) <= 1:
+            return
+        if self.worker is not None and self.worker.isRunning():
+            return
+        current = self.project_list.currentRow()
+        # 在开启同步的项目里找下一个
+        later = [i for i in enabled_rows if i > current]
+        next_row = later[0] if later else enabled_rows[0]
+        if next_row != current:
+            self.project_list.setCurrentRow(next_row)
+
+    def _sync_from_floating(self) -> None:
+        if not self.isVisible():
+            self._show_main_from_floating()
+        self.raise_()
+        self.activateWindow()
+        self._sync_current_project()
 
     def moveEvent(self, event):  # noqa: N802 - Qt API
         super().moveEvent(event)
@@ -799,10 +874,13 @@ class MainWindow(QMainWindow):
         self.title_version = QLabel("v0.2.2")
         self.title_version.setStyleSheet("color: #718096; font-size: 10px; padding-bottom: 4px;")
         self.title_version.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
-        toolbar.addWidget(title_icon)
-        toolbar.addWidget(title)
-        toolbar.addWidget(self.title_version)
+        toolbar.addWidget(title_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        toolbar.addWidget(title, 0, Qt.AlignmentFlag.AlignVCenter)
+        toolbar.addWidget(self.title_version, 0, Qt.AlignmentFlag.AlignVCenter)
         toolbar.addStretch(1)
+        self.dock_slot = DockSlot()
+        self.dock_slot.set_occupied(True)
+        toolbar.addWidget(self.dock_slot, 0, Qt.AlignmentFlag.AlignVCenter)
         root.addLayout(toolbar)
 
         title_divider = QFrame()
@@ -876,9 +954,8 @@ class MainWindow(QMainWindow):
         self.cards_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.cards_area.setWidget(self.cards_widget)
         repo_frame_layout.addWidget(self.cards_area)
-        # 185px cards x 2 rows + 8px gap + 4px grid/frame margins: four cards
-        # fit exactly, leaving the same breathing room above and below.
-        repo_frame.setFixedHeight(396)
+        # 175px cards x 2 rows + 8px gap + 16px grid/frame margins.
+        repo_frame.setFixedHeight(376)
         right_layout.addWidget(repo_frame)
 
         action_header = QHBoxLayout()
@@ -1580,17 +1657,19 @@ class MainWindow(QMainWindow):
             "nas": "NAS Gitea · NAS 套件",
             "github": "GitHub Remote · GitHub",
         }.get(remote.kind, "Remote Git · 远程 Git")
+        _full = bool(self._sync_settings().get("full_sync", False))
+        show_full = _full and remote.kind in ("local", "nas")
         subtitle = {
             "local": "当前电脑上的本地仓库和提交记录",
             "nas": "NAS 上 Gitea 仓库的连接和同步状态",
             "github": "GitHub 上的远程仓库和同步状态",
         }.get(remote.kind, "其他远程 Git 仓库和同步状态")
         if not data:
-            return StatusCard(key, title, subtitle, "等待检查", "#A9B5C8", "未检查")
+            return StatusCard(key, title, subtitle, "等待检查", "#A9B5C8", "未检查", show_full=show_full)
         if data.get("ignored") and remote.kind == "github":
-            return StatusCard(key, title, subtitle, "未代理", "#A9B5C8", "GitHub 连接失败，已按设置忽略")
+            return StatusCard(key, title, subtitle, "未代理", "#A9B5C8", "GitHub 连接失败，已按设置忽略", show_full=show_full)
         if data.get("error"):
-            return StatusCard(key, title, subtitle, "连接失败", "#F27788", data["error"])
+            return StatusCard(key, title, subtitle, "连接失败", "#F27788", data["error"], show_full=show_full)
         if remote.kind == "local":
             if not data.get("online"):
                 status, color = "读取失败", "#F27788"
@@ -1627,6 +1706,7 @@ class MainWindow(QMainWindow):
             body,
             rich_body=True,
             recent_commit=str(last.get("subject", "未知")),
+            show_full=show_full,
         )
 
     def _channel_address(self, remote: RemoteConfig, project: ProjectConfig | None) -> str:
@@ -1657,6 +1737,9 @@ class MainWindow(QMainWindow):
             remote = project.remotes.get(key)
             projects = self._detail_projects(project, key, remote)
             repository_target = self._repository_target(project, remote)
+            _full = bool(self._sync_settings().get("full_sync", False))
+            _show_full = _full and remote is not None and remote.kind in ("local", "nas")
+            _full_pixmap = render_state_pixmap("full", ACCENT_COLOR, 16) if _show_full else None
             detail = RepositoryDetailDialog(
                 title=card.card_title,
                 status=card.card_status,
@@ -1666,6 +1749,7 @@ class MainWindow(QMainWindow):
                 projects=projects,
                 repository_target=repository_target,
                 rename_enabled=key != "__staging__",
+                full_icon=_full_pixmap,
                 parent=self,
             )
             detail.project_view_requested.connect(self._view_detail_project)

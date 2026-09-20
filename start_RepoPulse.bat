@@ -4,9 +4,7 @@ setlocal EnableExtensions
 set "APP_DIR=%~dp0"
 cd /d "%APP_DIR%"
 
-echo Cleaning up any existing RepoPulse process...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$app = [IO.Path]::GetFullPath((Join-Path '%APP_DIR%' 'main.py')); Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" | Where-Object { $_.CommandLine -match [regex]::Escape($app) } | ForEach-Object { Write-Host ('Killing PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force }"
-timeout /t 1 /nobreak >nul
+REM 残留进程清理已交给 main.py（基于 PID 文件精准处理），此处不再每次遍历全部进程。
 
 set "PYTHON_EXE=%APP_DIR%.venv\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" (

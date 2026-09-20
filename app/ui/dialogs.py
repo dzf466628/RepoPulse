@@ -218,6 +218,7 @@ class RepositoryDetailDialog(QDialog):
         projects: list[dict] | None = None,
         repository_target: str = "",
         rename_enabled: bool = True,
+        full_icon=None,
         parent=None,
     ):
         super().__init__(parent)
@@ -250,6 +251,11 @@ class RepositoryDetailDialog(QDialog):
         header = QHBoxLayout()
         header.setContentsMargins(0, 0, 0, 0)
         header.addWidget(self.title_label)
+        if full_icon is not None:
+            full_label = QLabel()
+            full_label.setPixmap(full_icon)
+            full_label.setToolTip("全量储存：含素材大文件一起存储")
+            header.addWidget(full_label, 0, Qt.AlignmentFlag.AlignVCenter)
         header.addStretch(1)
         header.addWidget(status_label)
         header.addWidget(open_repository)
