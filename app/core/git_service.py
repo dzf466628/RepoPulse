@@ -58,17 +58,20 @@ class GitService:
             # the user's global Git configuration remains untouched.
             if "127.0.0.1:11304" in detail:
                 direct_command = [self.git, "-c", "http.https://github.com.proxy=", *args]
-                direct_result = subprocess.run(
-                    direct_command,
-                    cwd=str(cwd) if cwd else None,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=timeout,
-                    env=env,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
+                try:
+                    direct_result = subprocess.run(
+                        direct_command,
+                        cwd=str(cwd) if cwd else None,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=timeout,
+                        env=env,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                except subprocess.TimeoutExpired:
+                    raise GitCommandError(f"直连超时（{timeout} 秒），已跳过：{' '.join(args)}")
                 if direct_result.returncode == 0:
                     return direct_result.stdout.strip()
                 detail = (direct_result.stderr or direct_result.stdout).strip()
