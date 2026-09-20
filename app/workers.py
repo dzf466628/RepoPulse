@@ -53,6 +53,8 @@ class SyncWorker(QThread):
     failed = pyqtSignal(str)
     completed = pyqtSignal()
     progress_changed = pyqtSignal(int, int)
+    channel_started = pyqtSignal(str)
+    channel_finished = pyqtSignal(str, bool)
 
     def __init__(self, project: ProjectConfig, commit_message: str = "", full_sync: bool = False):
         super().__init__()
@@ -85,6 +87,8 @@ class SyncWorker(QThread):
                 self.project,
                 progress=mark_complete,
                 full_sync=self.full_sync,
+                on_channel_start=lambda key: self.channel_started.emit(key),
+                on_channel_finish=lambda key, ok: self.channel_finished.emit(key, ok),
             )
             self.result_ready.emit(result)
         except Exception as exc:  # pragma: no cover - 最后一道线程保护

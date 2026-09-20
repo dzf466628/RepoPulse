@@ -1145,7 +1145,7 @@ class MainWindow(QMainWindow):
         content.setFixedHeight(47)
         content.setStyleSheet("background: transparent; border: 0;")
         layout = QHBoxLayout(content)
-        layout.setContentsMargins(0, 0, 8, 0)
+        layout.setContentsMargins(5, 0, 8, 0)
         layout.setSpacing(SPACE_2)
         icon_box = QLabel()
         icon_box.setFixedSize(40, 40)
@@ -1515,26 +1515,26 @@ class MainWindow(QMainWindow):
             return
         project = self._current_project()
         if not project:
-            fw.set_project_state("", "waiting", STATE_COLORS["waiting"],
-                                 render_state_pixmap("waiting", STATE_COLORS["waiting"], 16))
-            for key in ("local", "nas", "github"):
-                fw.set_repo_state(key, None, "")
+            fw.clear_channels()
+            fw.set_project_state("", "waiting", STATE_COLORS["waiting"])
             fw.set_sync_enabled(False)
             return
+        # 渠道环按当前项目配置的 Git 渠道动态生成（暂存区不是推送渠道，不显示）
+        keys = list(project.remotes.keys())
+        fw.set_channels(keys)
         result = self.results.get(project.project_id, {})
         state = self._overall_icon(result) if result else "waiting"
         color = STATE_COLORS.get(state, STATE_COLORS["waiting"])
-        fw.set_project_state(project.name, state, color, render_state_pixmap(state, color, 16))
+        fw.set_project_state(project.name, state, color)
         remotes_data = result.get("remotes", {}) if result else {}
-        for key in ("local", "nas", "github"):
+        for key in keys:
             remote = project.remotes.get(key)
-            data = remotes_data.get(key)
             if remote is None:
-                fw.set_repo_state(key, None, "未配置")
                 continue
+            data = remotes_data.get(key)
             rk, tip = self._remote_state_key(remote, data)
-            fw.set_repo_state(key, render_state_pixmap(rk, STATE_COLORS.get(rk, STATE_COLORS["waiting"]), 14),
-                              f"{remote.label or key}：{tip}")
+            fw.set_channel_state(key, rk, STATE_COLORS.get(rk, STATE_COLORS["waiting"]),
+                                 f"{remote.label or key}：{tip}")
         busy = self.worker is not None and self.worker.isRunning()
         fw.set_sync_enabled(bool(project.sync_enabled) and not busy)
 
@@ -1658,7 +1658,7 @@ class MainWindow(QMainWindow):
             "github": "GitHub Remote · GitHub",
         }.get(remote.kind, "Remote Git · 远程 Git")
         _full = bool(self._sync_settings().get("full_sync", False))
-        show_full = _full and remote.kind in ("local", "nas")
+        show_full = _full and remote.kind == "local"
         subtitle = {
             "local": "当前电脑上的本地仓库和提交记录",
             "nas": "NAS 上 Gitea 仓库的连接和同步状态",
@@ -1738,7 +1738,7 @@ class MainWindow(QMainWindow):
             projects = self._detail_projects(project, key, remote)
             repository_target = self._repository_target(project, remote)
             _full = bool(self._sync_settings().get("full_sync", False))
-            _show_full = _full and remote is not None and remote.kind in ("local", "nas")
+            _show_full = _full and remote is not None and remote.kind == "local"
             _full_pixmap = render_state_pixmap("full", ACCENT_COLOR, 16) if _show_full else None
             detail = RepositoryDetailDialog(
                 title=card.card_title,
@@ -2027,13 +2027,34 @@ class MainWindow(QMainWindow):
         self._append_log(f"开始提交并同步：{project.name}" if commit_message else f"开始同步：{project.name}")
         self._sync_had_error = False
         values = self._sync_settings()
+        channel_keys = list(project.remotes.keys())
+        self._sync_channels_done = 0
+        self._sync_channels_total = len(channel_keys)
+        fw = getattr(self, "floating", None)
+        if fw is not None:
+            fw.set_channels(channel_keys)
+            fw.begin_sync(channel_keys)
         self.sync_worker = SyncWorker(project, commit_message=commit_message, full_sync=bool(values["full_sync"]))
         self.sync_worker.log_message.connect(self._append_log)
         self.sync_worker.progress_changed.connect(self._on_progress_changed)
         self.sync_worker.result_ready.connect(self._on_sync_result)
         self.sync_worker.failed.connect(self._on_sync_failed)
         self.sync_worker.completed.connect(self._on_sync_completed)
+        self.sync_worker.channel_started.connect(self._on_sync_channel_started)
+        self.sync_worker.channel_finished.connect(self._on_sync_channel_finished)
         self.sync_worker.start()
+
+    def _on_sync_channel_started(self, key: str) -> None:
+        fw = getattr(self, "floating", None)
+        if fw is not None:
+            fw.channel_started(key)
+
+    def _on_sync_channel_finished(self, key: str, ok: bool) -> None:
+        self._sync_channels_done = getattr(self, "_sync_channels_done", 0) + 1
+        fw = getattr(self, "floating", None)
+        if fw is not None:
+            fw.channel_finished(key, ok)
+            fw.set_overall_progress(self._sync_channels_done, self._sync_channels_total)
 
     def _on_sync_result(self, result: dict) -> None:
         failures = [item for item in result.get("results", []) if not item.get("ok")]
@@ -2057,6 +2078,12 @@ class MainWindow(QMainWindow):
         self._hide_busy_dialog()
         self._set_progress_style("error" if overall_error else "success")
         self._append_log("同步完成。" if not overall_error else "同步结束，部分渠道失败。")
+        fw = getattr(self, "floating", None)
+        if fw is not None and not has_more:
+            if overall_error:
+                fw.end_sync("warning", STATE_COLORS["warning"])
+            else:
+                fw.end_sync("clean", STATE_COLORS["clean"])
         self.refresh_selected(show_dialog=not self._tray_sync_requested)
         if has_more:
             QTimer.singleShot(0, self._start_next_automatic_sync)

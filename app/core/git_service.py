@@ -20,6 +20,28 @@ class GitCommandError(RuntimeError):
     pass
 
 
+def _format_git_date(raw: str) -> str:
+    """把 git --date=iso-strict 的 '2026-09-20T16:05:09+08:00' 显示成 '2026-09-20 16:05:09'。"""
+    text = (raw or "").strip().replace("T", " ")
+    m = re.match(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)", text)
+    return m.group(1) if m else (raw or "")
+
+
+# 全量储存镜像时排除的临时/可再生成目录（任意层级同名目录都会被排除）
+_FULL_EXCLUDE_DIRS = [
+    ".git", ".venv", "venv", "env", ".tox",
+    "node_modules", "__pycache__",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache",
+    ".idea", ".vscode", ".vs",
+    "build", "dist", "out", "target",
+]
+# 全量储存镜像时排除的临时/可再生成文件
+_FULL_EXCLUDE_FILES = [
+    "*.pyc", "*.pyo", "*.log", "*.tmp", "*.bak",
+    "Thumbs.db", ".DS_Store", "*.swp",
+]
+
+
 class GitService:
     def __init__(self, log: Callable[[str], None] | None = None):
         self.log = log or (lambda _message: None)
@@ -533,7 +555,7 @@ class GitService:
             if len(parts) == 4:
                 result["last_commit"] = {
                     "hash": parts[0],
-                    "date": parts[1],
+                    "date": _format_git_date(parts[1]),
                     "author": parts[2],
                     "subject": parts[3],
                 }
@@ -703,7 +725,7 @@ class GitService:
             if len(parts) == 4:
                 result["last_commit"] = {
                     "hash": parts[0],
-                    "date": parts[1],
+                    "date": _format_git_date(parts[1]),
                     "author": parts[2],
                     "subject": parts[3],
                 }
@@ -759,6 +781,8 @@ class GitService:
         project: ProjectConfig,
         progress: Callable[[], None] | None = None,
         full_sync: bool = False,
+        on_channel_start: Callable[[str], None] | None = None,
+        on_channel_finish: Callable[[str, bool], None] | None = None,
     ) -> dict:
         """将当前项目的已提交内容同步到每个已配置 Git 渠道。
 
@@ -782,6 +806,8 @@ class GitService:
         results: list[dict] = []
         for key, remote in project.remotes.items():
             label = remote.label or remote.kind
+            if on_channel_start:
+                on_channel_start(key)
             try:
                 if remote.kind == "local":
                     result = self._sync_local_channel(source, branch, remote, project, label, full_sync=full_sync)
@@ -793,6 +819,8 @@ class GitService:
             result["key"] = key
             result["label"] = label
             results.append(result)
+            if on_channel_finish:
+                on_channel_finish(key, bool(result.get("ok")))
             if progress:
                 progress()
         return {"project_id": project.project_id, "results": results}
@@ -827,6 +855,34 @@ class GitService:
             "head": head,
         }
 
+    def _mirror_workspace_full(self, source: Path, target: Path) -> None:
+        """用 robocopy 把整个工作区镜像到全量本地仓库（含素材大文件，排除临时文件）。
+
+        robocopy 退出码 0-7 均为成功（0=无拷贝，1=有拷贝，2/3=额外文件等），
+        >=8 才是真正的错误。被 /XD 排除的目录既不复制也不在镜像模式下被删除，
+        因此 target 自身的 .git 会被保留。
+        """
+        cmd = [
+            "robocopy", str(source), str(target),
+            "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
+            "/XD", *_FULL_EXCLUDE_DIRS,
+            "/XF", *_FULL_EXCLUDE_FILES,
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode >= 8:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise GitCommandError(
+                f"全量镜像拷贝失败（robocopy 退出码 {result.returncode}）{detail}"
+            )
+
     def _sync_local_channel(
         self,
         source: Path,
@@ -859,7 +915,10 @@ class GitService:
         self._run(["fetch", "--quiet", str(source), branch], cwd=target, timeout=45)
         self._run(["checkout", "-B", branch, "FETCH_HEAD"], cwd=target, timeout=45)
         if full_sync:
-            self._run(["clean", "-fdx"], cwd=target, timeout=45)
+            # 全量储存：把整个工作区（代码 + 素材大文件，排除临时/可再生成文件）
+            # 镜像到本仓库。target 自身的 .git 不参与镜像，保持不动。
+            self._mirror_workspace_full(source, target)
+            self.log(f"{label}：已全量镜像工作区（含素材大文件）")
         return {"ok": True, "message": f"{label}：同步完成"}
 
     def _sync_remote_channel(

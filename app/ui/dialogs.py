@@ -576,9 +576,9 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         settings = QSettings("RepoPulse", "RepoPulse")
-        self.full_sync_check = QCheckBox("本地 Git / NAS Git 全量同步")
+        self.full_sync_check = QCheckBox("本地 Git 全量同步（连素材大文件一起存）")
         self.full_sync_check.setChecked(settings.value("sync_full_files", False, type=bool))
-        self.full_sync_check.setToolTip("同步本地 Git 和 NAS Git 时完整对齐文件")
+        self.full_sync_check.setToolTip("开启后，本地全量仓库会镜像整个工作区，代码和素材大文件一起存储；其他 Git 远程仍只推代码")
         self.ignore_github_check = QCheckBox("GitHub 连接失败自动忽略")
         self.ignore_github_check.setChecked(settings.value("ignore_github_failure", False, type=bool))
         self.ignore_github_check.setToolTip("GitHub 不可用时显示“未代理”，不影响其他渠道状态")
