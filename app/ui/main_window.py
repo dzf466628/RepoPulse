@@ -511,6 +511,7 @@ class MainWindow(QMainWindow):
         self.selected_git_key: str | None = None
         self.log_history: list[str] = []
         self.busy_dialog: BusyDialog | None = None
+        self._github_bad: set[str] = set()
         self.auto_sync_queue: list[ProjectConfig] = []
         self.auto_sync_reason = ""
         self.auto_sync_timer = QTimer(self)
@@ -1918,7 +1919,7 @@ class MainWindow(QMainWindow):
         self._set_progress_style("running")
         self._append_log("开始刷新状态……")
         values = self._sync_settings()
-        self.worker = StatusWorker(projects, ignore_github_failure=bool(values["ignore_github"]))
+        self.worker = StatusWorker(projects, ignore_github_failure=bool(values["ignore_github"]), skip_github=self._github_bad)
         self.worker.project_ready.connect(self._on_project_ready)
         self.worker.log_message.connect(self._append_log)
         self.worker.progress_changed.connect(self._on_progress_changed)

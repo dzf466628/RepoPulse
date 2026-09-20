@@ -13,10 +13,11 @@ class StatusWorker(QThread):
     completed = pyqtSignal()
     progress_changed = pyqtSignal(int, int)
 
-    def __init__(self, projects: list[ProjectConfig], ignore_github_failure: bool = False):
+    def __init__(self, projects: list[ProjectConfig], ignore_github_failure: bool = False, skip_github: set[str] | None = None):
         super().__init__()
         self.projects = projects
         self.ignore_github_failure = ignore_github_failure
+        self.skip_github = skip_github
 
     def run(self) -> None:
         try:
@@ -36,6 +37,7 @@ class StatusWorker(QThread):
                     project,
                     progress=mark_complete,
                     ignore_github_failure=self.ignore_github_failure,
+                    skip_github=self.skip_github,
                 )
                 self.project_ready.emit(project.project_id, result)
                 self.log_message.emit(f"完成检查：{project.name}")

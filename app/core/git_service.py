@@ -710,13 +710,35 @@ class GitService:
         project: ProjectConfig,
         progress: Callable[[], None] | None = None,
         ignore_github_failure: bool = False,
+        skip_github: set[str] | None = None,
     ) -> dict:
         local = self.local_status(project)
         if progress:
             progress()
         remotes = {}
         for key, remote in project.remotes.items():
-            remotes[key] = self.remote_status(project, remote, local, key)
+            remote_url = remote.url or self.repository_url_for_project(remote, project.name)
+            if (
+                skip_github is not None
+                and remote.kind == "github"
+                and remote_url in skip_github
+            ):
+                remotes[key] = {
+                    "label": remote.label or "Github",
+                    "url": remote_url,
+                    "relation": "未代理",
+                    "online": False,
+                    "ignored": True,
+                    "error": "本次运行已跳过",
+                }
+            else:
+                remotes[key] = self.remote_status(project, remote, local, key)
+                if (
+                    remote.kind == "github"
+                    and remotes[key].get("error")
+                    and skip_github is not None
+                ):
+                    skip_github.add(remote_url)
             if ignore_github_failure and remote.kind == "github" and remotes[key].get("error"):
                 remotes[key]["relation"] = "未代理"
                 remotes[key]["online"] = False
