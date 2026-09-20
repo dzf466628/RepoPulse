@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from PyQt6.QtCore import QByteArray, QEvent, QPoint, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtCore import QByteArray, QEvent, QPoint, QMimeData, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QDrag, QIcon, QPainter, QPen, QPixmap
 from PyQt6 import sip
 
 
@@ -242,10 +242,34 @@ def render_state_pixmap(state: str, color: str, size: int = 12) -> QPixmap:
     return pm
 
 
+class DragPreview(QWidget):
+    """跟随鼠标的半透明卡片拖动预览（cards_widget 内部子部件，不参与布局）。"""
+
+    def __init__(self, pixmap: QPixmap, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._pix = pixmap
+        self.setFixedSize(pixmap.size())
+        from PyQt6.QtWidgets import QGraphicsOpacityEffect
+        eff = QGraphicsOpacityEffect(self)
+        eff.setOpacity(0.85)
+        self.setGraphicsEffect(eff)
+
+    def paintEvent(self, event):  # noqa: N802 - Qt API
+        painter = QPainter(self)
+        painter.drawPixmap(0, 0, self._pix)
+        painter.end()
+
+    def follow(self, local_pos: QPoint) -> None:
+        self.move(local_pos.x() - self.width() // 2, local_pos.y() - self.height() // 2)
+        self.raise_()
+
+
 class StatusCard(QFrame):
     clicked = pyqtSignal(str)
     drag_started = pyqtSignal(str)
     drag_finished = pyqtSignal(str, QPoint)
+    drag_moved = pyqtSignal(str, QPoint)
 
     def __init__(
         self,
@@ -274,6 +298,7 @@ class StatusCard(QFrame):
         self._hover_animation.valueChanged.connect(self._on_hover_color)
         self._press_pos: QPoint | None = None
         self._dragging = False
+        self._draggable = True
         self._click_timer = QTimer(self)
         self._click_timer.setSingleShot(True)
         self._click_timer.setInterval(240)
@@ -409,14 +434,24 @@ class StatusCard(QFrame):
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
         if (
-            self._press_pos is not None
+            self._draggable
+            and self._press_pos is not None
             and not self._dragging
             and event.buttons() & Qt.MouseButton.LeftButton
             and (event.position().toPoint() - self._press_pos).manhattanLength() >= QApplication.startDragDistance()
         ):
             self._dragging = True
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            drag = QDrag(self)
+            mime = QMimeData()
+            mime.setText(self.card_key)
+            drag.setMimeData(mime)
+            drag.setPixmap(self.grab())
+            drag.setHotSpot(event.position().toPoint())
             self.drag_started.emit(self.card_key)
+            drag.exec(Qt.DropAction.MoveAction)
+            self.drag_finished.emit(self.card_key, self.mapToGlobal(event.position().toPoint()))
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -439,6 +474,100 @@ class ProjectListWidget(QListWidget):
         super().__init__(parent)
         self.setMouseTracking(True)
         self._hovered_switch: CapsuleSwitch | None = None
+        # 拖动换序：手动 QDrag 方案，与右边仓库卡片完全一致
+        self.setDragDropMode(QListWidget.DragDropMode.NoDragDrop)
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+        self._drag_press_pos = None
+        self._drag_pid = None
+        self._drag_dropped = False
+
+    def _find_item(self, pid):
+        for i in range(self.count()):
+            it = self.item(i)
+            if it.data(Qt.ItemDataRole.UserRole) == pid:
+                return it
+        return None
+
+    def dragEnterEvent(self, event):  # noqa: N802 - Qt API
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):  # noqa: N802 - Qt API
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):  # noqa: N802 - Qt API
+        pid = event.mimeData().text()
+        if self._find_item(pid) is not None:
+            self._reorder_projects(pid, event.position().toPoint())
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
+    def _visible_rows(self, drag_pid):
+        rows = []
+        for i in range(self.count()):
+            it = self.item(i)
+            pid = it.data(Qt.ItemDataRole.UserRole)
+            if not it.isHidden() and pid != drag_pid:
+                rows.append((pid, self.visualItemRect(it)))
+        return rows
+
+    def _project_insert_index(self, drag_pid, point) -> int:
+        rows = self._visible_rows(drag_pid)
+        for n, (_pid, r) in enumerate(rows):
+            if r.contains(point):
+                rel_y = (point.y() - r.top()) / max(1, r.height())
+                return n if rel_y < 0.5 else n + 1
+        for n, (_pid, r) in enumerate(rows):
+            if point.y() < r.center().y():
+                return n
+        return len(rows)
+
+    def _reorder_projects(self, drag_pid, point) -> None:
+        mw = self.window()
+        others = []
+        for i in range(self.count()):
+            it = self.item(i)
+            pid = it.data(Qt.ItemDataRole.UserRole)
+            if pid and not it.isHidden() and pid != drag_pid and pid not in others:
+                others.append(pid)
+        idx = max(0, min(self._project_insert_index(drag_pid, point), len(others)))
+        ordered = others[:idx] + [drag_pid] + others[idx:]
+        self._drag_dropped = True
+        if hasattr(mw, "projects") and hasattr(mw, "store"):
+            by_id = {p.project_id: p for p in mw.projects}
+            new_order = [by_id[p] for p in ordered if p in by_id]
+            if [p.project_id for p in new_order] != [p.project_id for p in mw.projects]:
+                mw.projects = new_order
+                mw.store.save(mw.projects)
+                mw._append_log("项目顺序已调整")
+            cur = mw._current_project()
+            mw._reload_project_list(select_id=cur.project_id if cur else None)
+
+    def _start_project_drag(self, pid, mouse_pos) -> None:
+        item = self._find_item(pid)
+        if item is None:
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(pid)
+        drag.setMimeData(mime)
+        self._drag_dropped = False
+        # 被拖行选中高亮，跟随图直接抓 viewport 上这块真实显示的选中行（不透明），
+        # 拖动图就是"选中的样子"，跟随鼠标移动
+        item.setSelected(True)
+        rect = self.visualItemRect(item)
+        drag.setPixmap(self.viewport().grab(rect))
+        drag.setHotSpot(mouse_pos - rect.topLeft())
+        drag.exec(Qt.DropAction.MoveAction)
+        self._drag_pid = None
+        self._drag_press_pos = None
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt API
         item = self.itemAt(event.position().toPoint())
@@ -454,6 +583,15 @@ class ProjectListWidget(QListWidget):
             self._hovered_switch = current_switch
         if current_switch is not None:
             current_switch.set_hovered(True)
+        if (
+            self._drag_press_pos is not None
+            and self._drag_pid
+            and event.buttons() & Qt.MouseButton.LeftButton
+            and (event.position().toPoint() - self._drag_press_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self._start_project_drag(self._drag_pid, event.position().toPoint())
+            return
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
@@ -467,9 +605,14 @@ class ProjectListWidget(QListWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             item = self.itemAt(event.position().toPoint())
             if item is not None and event.position().x() >= self.visualItemRect(item).right() - 56:
+                self._drag_press_pos = None
+                self._drag_pid = None
                 self.switch_clicked.emit(self.row(item))
                 return
+            self._drag_press_pos = event.position().toPoint()
+            self._drag_pid = item.data(Qt.ItemDataRole.UserRole) if item is not None else None
         super().mousePressEvent(event)
+
 
 
 class CapsuleSwitch(QWidget):
@@ -608,6 +751,9 @@ class MainWindow(QMainWindow):
         set_dark_title_bar(self)
         self.store = ProjectStore()
         self.projects = self.store.load()
+        # 启动时项目默认全部关闭（不恢复上次开关状态）
+        for _p in self.projects:
+            _p.sync_enabled = False
         self.remotes = self.store.global_remotes
         self.card_order = self.store.global_card_order
         for project in self.projects:
@@ -956,6 +1102,8 @@ class MainWindow(QMainWindow):
         self.cards_area.setFrameShape(QFrame.Shape.NoFrame)
         self.cards_area.setViewportMargins(0, 0, 0, 0)
         self.cards_widget = QWidget()
+        self.cards_widget.setAcceptDrops(True)
+        self.cards_widget.installEventFilter(self)
         self.cards_grid = QGridLayout(self.cards_widget)
         self.cards_grid.setContentsMargins(SPACE_1, SPACE_1, SPACE_1, SPACE_1)
         self.cards_grid.setHorizontalSpacing(SPACE_2)
@@ -964,6 +1112,8 @@ class MainWindow(QMainWindow):
         self.cards_grid.setColumnStretch(1, 1)
         self.cards_grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.cards_area.setWidget(self.cards_widget)
+        self.cards_area.viewport().setAcceptDrops(True)
+        self.cards_area.viewport().installEventFilter(self)
         repo_frame_layout.addWidget(self.cards_area)
         # 175px cards x 2 rows + 8px gap + 16px grid/frame margins.
         repo_frame.setFixedHeight(376)
@@ -1570,6 +1720,7 @@ class MainWindow(QMainWindow):
         card.drag_started.connect(self._start_card_drag)
         card.drag_finished.connect(self._finish_card_drag)
         self.card_widgets[key] = card
+        card._draggable = key != "__staging__"
         card.set_selected(key == self.selected_git_key)
         row, column = divmod(index, 2)
         self.cards_grid.addWidget(card, row, column)
@@ -1594,35 +1745,77 @@ class MainWindow(QMainWindow):
 
     def _start_card_drag(self, key: str) -> None:
         card = self.card_widgets.get(key)
-        if card:
-            card.set_selected(True)
-            self._dragging_card_key = key
+        if not card:
+            return
+        card.set_selected(True)
+        self._dragging_card_key = key
+        self._drag_dropped = False
+        # 原位置卡片隐藏，原生 QDrag 提供跟随鼠标的拖动图（系统绘制，流畅不卡）
+        card.hide()
+
+    def _handle_card_drop(self, key: str, point: QPoint) -> None:
+        others = [k for k, c in self.card_widgets.items() if c.isVisible()]
+        insert_index = self._compute_insert_index(others, point)
+        insert_index = max(0, min(insert_index, len(others)))
+        ordered = others[:insert_index] + [key] + others[insert_index:]
+        # 暂存区固定第一位
+        if "__staging__" in ordered:
+            ordered = [k for k in ordered if k != "__staging__"]
+            ordered.insert(0, "__staging__")
+        self._drag_dropped = True
+        moved_title = self.card_widgets[key].card_title
+        project = self._current_project()
+        self.card_order = ordered
+        self.store.global_card_order = list(ordered)
+        self.store.save(self.projects)
+        if project:
+            self._render_cards(self.results.get(project.project_id))
+        else:
+            self._render_cards(None)
+        self._append_log(f"已调整卡片位置：{moved_title}")
+
+    def _compute_insert_index(self, others: list[str], point: QPoint) -> int:
+        """拖过某卡片区域 30% 即认为要插到该位置。"""
+        n = len(others)
+        for i, key in enumerate(others):
+            card = self.card_widgets.get(key)
+            if card is None:
+                continue
+            r = card.geometry()
+            if r.contains(point):
+                rel_x = (point.x() - r.left()) / max(1, r.width())
+                rel_y = (point.y() - r.top()) / max(1, r.height())
+                if rel_x < 0.3:
+                    return i
+                if rel_x > 0.7:
+                    return i + 1
+                return i if rel_y < 0.5 else i + 1
+        if not others:
+            return 0
+        first = self.card_widgets[others[0]].geometry()
+        last = self.card_widgets[others[-1]].geometry()
+        if point.y() < first.top():
+            return 0
+        if point.y() > last.bottom():
+            return n
+        mid_x = (first.left() + first.right()) // 2
+        col = 0 if point.x() < mid_x else 1
+        rows = (n + 1) // 2
+        row_h = max(1, last.bottom() - first.top()) // max(1, rows)
+        row = max(0, min(rows - 1, (point.y() - first.top()) // max(1, row_h)))
+        return min(n, row * 2 + col)
 
     def _finish_card_drag(self, key: str, global_pos: QPoint) -> None:
         if getattr(self, "_dragging_card_key", None) != key:
             return
         self._dragging_card_key = None
-        project = self._current_project()
-        if not project:
-            return
-        ordered = [card_key for card_key, card in self.card_widgets.items() if card.isVisible()]
-        if key not in ordered:
-            return
-        point = self.cards_widget.mapFromGlobal(global_pos)
-        target_index = self._drop_index(ordered, key, point)
-        old_index = ordered.index(key)
-        ordered.pop(old_index)
-        if target_index > old_index:
-            target_index -= 1
-        ordered.insert(max(0, min(target_index, len(ordered))), key)
-        if ordered == [card_key for card_key in self._visible_card_order(project)]:
-            return
-        moved_title = self.card_widgets[key].card_title
-        self.card_order = ordered
-        self.store.global_card_order = list(ordered)
-        self.store.save(self.projects)
-        self._render_cards(self.results.get(project.project_id))
-        self._append_log(f"已调整卡片位置：{moved_title}")
+        self.unsetCursor()
+        # 没有成功放下（拖到外面取消）：恢复原卡片
+        if not getattr(self, "_drag_dropped", False):
+            card = self.card_widgets.get(key)
+            if card is not None:
+                card.setGraphicsEffect(None)
+                card.show()
 
     def _drop_index(self, ordered: list[str], moving_key: str, point: QPoint) -> int:
         candidates = []
@@ -1650,6 +1843,20 @@ class MainWindow(QMainWindow):
     def eventFilter(self, watched, event):  # noqa: N802 - Qt API
         if isinstance(watched, StatusCard) and event.type() == event.Type.Enter:
             watched.raise_()
+        if watched is self.cards_widget or watched is self.cards_area.viewport():
+            etype = event.type()
+            if etype == QEvent.Type.DragEnter and event.mimeData().hasText():
+                event.acceptProposedAction()
+                return True
+            if etype == QEvent.Type.DragMove:
+                event.acceptProposedAction()
+                return True
+            if etype == QEvent.Type.Drop:
+                key = event.mimeData().text()
+                pos = self.cards_widget.mapFrom(watched, event.position().toPoint())
+                self._handle_card_drop(key, pos)
+                event.acceptProposedAction()
+                return True
         return super().eventFilter(watched, event)
 
     def _build_staging_card(self, local: dict) -> StatusCard:
@@ -1789,7 +1996,7 @@ class MainWindow(QMainWindow):
             detail.rename_requested.connect(lambda name: self._rename_card(key, name))
             detail.remove_repository_requested.connect(lambda: self._remove_repository_card(key, detail))
             if key == "__staging__":
-                detail.view_project_requested.connect(lambda: self._open_repository_target(project.workspace_path))
+                detail.view_project_requested.connect(lambda: self._open_project_folder(project))
                 detail.migrate_project_requested.connect(lambda: self._migrate_project(detail, project))
                 detail.rename_project_requested.connect(lambda: self._rename_project(detail, project))
                 detail.delete_project_requested.connect(lambda: self._delete_from_staging_detail(detail, project))
@@ -1961,6 +2168,15 @@ class MainWindow(QMainWindow):
         self._reload_project_list(select_id=project.project_id)
         self._render_cards(None)
         self._append_log(f"已删除仓库卡片：{remote.label or remote.kind}")
+
+    def _open_project_folder(self, project) -> None:
+        p = Path(project.workspace_path)
+        if not p.is_dir():
+            QMessageBox.warning(self, "查看", f"目录不存在：\n{p}")
+            return
+        self._append_log(f"打开项目文件夹：{p}")
+        import subprocess as _sp
+        _sp.Popen(["explorer.exe", str(p)])
 
     def _open_repository_target(self, target: str) -> None:
         if not target:

@@ -106,13 +106,16 @@ def main() -> int:
     apply_theme(app)
     window = MainWindow()
     window.show()
+    code = 0
     try:
-        return app.exec()
+        code = app.exec()
     finally:
         try:
             pid_path.unlink()
         except OSError:
             pass
+    # 事件循环结束后强制结束进程，避免残留 QThread/定时器导致进程挂住、控制台不关闭
+    os._exit(int(code or 0))
 
 
 if __name__ == "__main__":
