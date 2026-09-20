@@ -516,6 +516,9 @@ class MainWindow(QMainWindow):
         self.auto_sync_reason = ""
         self.auto_sync_timer = QTimer(self)
         self.auto_sync_timer.timeout.connect(self._run_scheduled_sync)
+        self._auto_sync_delay_timer = QTimer(self)
+        self._auto_sync_delay_timer.setSingleShot(True)
+        self._auto_sync_delay_timer.timeout.connect(self._start_next_automatic_sync)
         self._build_ui()
         self._reload_project_list()
         self._apply_sync_settings()
@@ -1637,6 +1640,7 @@ class MainWindow(QMainWindow):
         if self.worker and self.worker.isRunning():
             self._append_log("状态检查进行中，请稍后再同步。")
             return
+        self._auto_sync_delay_timer.stop()
         self._set_sync_busy(True)
         if not self._tray_sync_requested:
             self._show_busy_dialog("正在提交并同步全部 Git 渠道" if commit_message else "正在同步全部 Git 渠道")
@@ -1910,6 +1914,7 @@ class MainWindow(QMainWindow):
         projects = [project for project in projects if project.sync_enabled]
         if not projects or (self.worker and self.worker.isRunning()):
             return
+        self._auto_sync_delay_timer.stop()
         self._set_busy(True)
         if show_dialog:
             self._show_busy_dialog("正在读取全部 Git 状态")
@@ -1946,11 +1951,24 @@ class MainWindow(QMainWindow):
             return
         if not project or not project.sync_enabled:
             return
-        if any(
+        if not any(
             remote.get("kind") == "local" and int(remote.get("ahead") or 0) >= threshold
             for remote in result.get("remotes", {}).values()
         ):
-            self._queue_automatic_sync([project], "检测同步")
+            return
+        # 安全检查：只要有在线远程比本地新（本地落后），就不自动同步，防止把旧本地推上去
+        for remote in result.get("remotes", {}).values():
+            if remote.get("kind") == "local":
+                continue
+            if not remote.get("online"):
+                continue
+            behind = remote.get("behind")
+            if behind is not None and int(behind) > 0:
+                self._append_log(
+                    f"跳过自动同步：{remote.get('label', '远程')} 有 {behind} 个本地没有的提交，请先拉取更新。"
+                )
+                return
+        self._queue_automatic_sync([project], "检测同步")
 
     def _on_refresh_completed(self) -> None:
         self._set_busy(False)
@@ -1963,7 +1981,8 @@ class MainWindow(QMainWindow):
         self._set_progress_style("error" if has_error else "success")
         self._append_log("刷新完成。")
         if self.auto_sync_queue:
-            QTimer.singleShot(0, self._start_next_automatic_sync)
+            self._append_log("检测到本地领先，20 秒后自动同步（可手动操作取消）……")
+            self._auto_sync_delay_timer.start(20000)
 
     def add_git(self, dialog: GitDialog | None = None) -> None:
         if dialog is None:
