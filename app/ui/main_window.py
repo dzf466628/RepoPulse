@@ -56,7 +56,7 @@ from app.ui.theme import (
     SPACE_3,
     set_dark_title_bar,
 )
-from app.workers import ProjectCreateWorker, ProjectDeleteWorker, StatusWorker, SyncWorker
+from app.workers import ProjectCreateWorker, ProjectDeleteWorker, PullWorker, StatusWorker, SyncWorker
 
 
 def _settings_icon() -> QIcon:
@@ -391,10 +391,13 @@ class CapsuleSwitch(QWidget):
         self.update()
 
     def set_hovered(self, hovered: bool) -> None:
-        self._hover_animation.stop()
-        self._hover_animation.setStartValue(self._hover_amount)
-        self._hover_animation.setEndValue(1.0 if hovered else 0.0)
-        self._hover_animation.start()
+        animation = getattr(self, "_hover_animation", None)
+        if animation is None or not _qobj_alive(animation):
+            return
+        animation.stop()
+        animation.setStartValue(self._hover_amount)
+        animation.setEndValue(1.0 if hovered else 0.0)
+        animation.start()
 
     def _on_hover_value(self, value) -> None:
         self._hover_amount = float(value)
@@ -505,6 +508,7 @@ class MainWindow(QMainWindow):
         self.results: dict[str, dict] = {}
         self.worker: StatusWorker | None = None
         self.sync_worker: SyncWorker | None = None
+        self.pull_worker: PullWorker | None = None
         self.create_worker: ProjectCreateWorker | None = None
         self.quick_buttons: list[QPushButton] = []
         self.card_widgets: dict[str, StatusCard] = {}
@@ -569,7 +573,24 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    def _stop_background_threads(self) -> None:
+        self.auto_sync_delay_timer.stop()
+        self.auto_sync_timer.stop()
+        for thread in (getattr(self, "worker", None), getattr(self, "sync_worker", None), getattr(self, "create_worker", None), getattr(self, "pull_worker", None)):
+            if thread is None:
+                continue
+            try:
+                if thread.isRunning():
+                    thread.quit()
+                    thread.wait(2000)
+                if thread.isRunning():
+                    thread.terminate()
+                    thread.wait(2000)
+            except RuntimeError:
+                pass
+
     def _exit_from_tray(self) -> None:
+        self._stop_background_threads()
         self._allow_close = True
         self.close()
 
@@ -631,6 +652,7 @@ class MainWindow(QMainWindow):
             self.hide()
             event.ignore()
             return
+        self._stop_background_threads()
         self._allow_close = True
         event.accept()
 
@@ -760,6 +782,7 @@ class MainWindow(QMainWindow):
             "color: #CDD6E5; padding: 6px 8px; min-height: 16px; }"
             f"QPushButton#quickAction:hover {{ background: #16485B; border-color: {ACCENT_COLOR}; color: #FFFFFF; }}"
             f"QPushButton#quickAction:pressed {{ background: {ACCENT_DARK}; border-color: {ACCENT_HOVER}; }}"
+            "QPushButton#quickAction:disabled { color: #5A6678; background: #0A202E; border-color: #16323F; }"
         )
         action_frame.setFixedHeight(54)
         action_layout = QHBoxLayout(action_frame)
@@ -785,7 +808,15 @@ class MainWindow(QMainWindow):
         refresh_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         refresh_button.setToolTip("刷新全部项目和 Git 渠道状态")
         refresh_button.clicked.connect(self.refresh_all)
-        self.quick_buttons = [sync_button, new_project_button, refresh_button]
+        self.pull_button = QPushButton("拉取到本地")
+        self.pull_button.setObjectName("quickAction")
+        self.pull_button.setFixedHeight(30)
+        self.pull_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pull_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.pull_button.setToolTip("从在线远程快进拉取最新提交到本地（本地落后时可用）")
+        self.pull_button.setEnabled(False)
+        self.pull_button.clicked.connect(self._pull_current_project)
+        self.quick_buttons = [sync_button, new_project_button, refresh_button, self.pull_button]
         for button in self.quick_buttons:
             action_layout.addWidget(button, 1)
         right_layout.addWidget(action_frame)
@@ -810,8 +841,8 @@ class MainWindow(QMainWindow):
         info_layout.setSpacing(SPACE_1)
         self.settings_button = QToolButton()
         self.settings_button.setObjectName("settingsButton")
-        self.settings_button.setToolTip("同步设置")
-        self.settings_button.setAccessibleName("同步设置")
+        self.settings_button.setToolTip("设置")
+        self.settings_button.setAccessibleName("设置")
         self.settings_button.setIcon(_settings_icon())
         self.settings_button.setIconSize(QSize(17, 17))
         self.settings_button.setFixedSize(28, 26)
@@ -1223,6 +1254,7 @@ class MainWindow(QMainWindow):
             else:
                 card = self._build_remote_card(key, remote, remote_result)
             self._add_card(key, card, index)
+        self._update_pull_button_state()
 
     def _add_card(self, key: str, card: StatusCard, index: int) -> None:
         card.clicked.connect(self._select_card)
@@ -1634,6 +1666,60 @@ class MainWindow(QMainWindow):
         if self.tray_sync_action is not None:
             self.tray_sync_action.setEnabled(not busy)
 
+    def _update_pull_button_state(self) -> None:
+        project = self._current_project()
+        if not project:
+            self.pull_button.setEnabled(False)
+            return
+        result = self.results.get(project.project_id, {})
+        can_pull = False
+        for remote in result.get("remotes", {}).values():
+            if remote.get("kind") == "local":
+                continue
+            if not remote.get("online"):
+                continue
+            behind = remote.get("behind")
+            if behind is not None and int(behind) > 0:
+                can_pull = True
+                break
+        self.pull_button.setEnabled(can_pull)
+
+    def _pull_current_project(self) -> None:
+        project = self._current_project()
+        if not project:
+            return
+        if self.worker and self.worker.isRunning():
+            self._append_log("状态检查进行中，请稍后再拉取。")
+            return
+        if self.sync_worker and self.sync_worker.isRunning():
+            self._append_log("同步进行中，请稍后再拉取。")
+            return
+        self._auto_sync_delay_timer.stop()
+        self._set_busy(True)
+        self._show_busy_dialog("正在从远程拉取最新提交")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self._set_progress_style("running")
+        self._append_log("开始拉取到本地……")
+        self.pull_worker = PullWorker(project)
+        self.pull_worker.log_message.connect(self._append_log)
+        self.pull_worker.progress_changed.connect(self._on_progress_changed)
+        self.pull_worker.result_ready.connect(self._on_pull_result)
+        self.pull_worker.failed.connect(lambda message: self._append_log(f"拉取失败：{message}"))
+        self.pull_worker.completed.connect(self._on_pull_completed)
+        self.pull_worker.start()
+
+    def _on_pull_result(self, results: list) -> None:
+        for item in results:
+            self._append_log(item.get("message", ""))
+
+    def _on_pull_completed(self) -> None:
+        self._set_busy(False)
+        self._hide_busy_dialog()
+        self._set_progress_style("success")
+        self._append_log("拉取完成。")
+        self.refresh_selected(show_dialog=False)
+
     def _start_sync(self, project: ProjectConfig, commit_message: str = "", automatic: bool = False) -> None:
         if self.sync_worker and self.sync_worker.isRunning():
             return
@@ -1901,6 +1987,8 @@ class MainWindow(QMainWindow):
         self.settings_button.setEnabled(not busy)
         for button in self.quick_buttons:
             button.setEnabled(not busy)
+        if not busy:
+            self._update_pull_button_state()
 
     def refresh_all(self) -> None:
         self._start_refresh([project for project in self.projects if project.sync_enabled])

@@ -49,6 +49,20 @@ GIT_TYPES = [
 ]
 
 
+KIND_DISPLAY = {
+    "local": "本地 Git 渠道",
+    "github": "GitHub",
+    "gitlab": "GitLab",
+    "gitee": "Gitee",
+    "gitea": "自建 Gitea",
+    "nas": "NAS Git 套件",
+    "bitbucket": "Bitbucket",
+    "azure_devops": "Azure DevOps",
+    "codeberg": "Codeberg",
+    "custom": "其他 Git 仓库",
+}
+
+
 def _compact_button_box(box: QDialogButtonBox) -> QDialogButtonBox:
     """Use compact Chinese labels for every dialog action row."""
     labels = {
@@ -247,9 +261,6 @@ class RepositoryDetailDialog(QDialog):
         self.projects_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.projects_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.projects_scroll.setWidget(self._build_projects_widget(projects or []))
-        remove_button = QPushButton("删除本仓库")
-        remove_button.setFixedHeight(30)
-        remove_button.clicked.connect(self.remove_repository_requested.emit)
         close_button = QPushButton("关闭")
         close_button.setFixedHeight(30)
         close_button.setMinimumWidth(72)
@@ -257,7 +268,6 @@ class RepositoryDetailDialog(QDialog):
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
         footer.setSpacing(SPACE_2)
-        footer.addWidget(remove_button)
         footer.addStretch(1)
         footer.addWidget(close_button)
 
@@ -270,8 +280,7 @@ class RepositoryDetailDialog(QDialog):
         layout.addWidget(self.projects_scroll, 1)
         layout.addLayout(footer)
 
-        if not rename_enabled:
-            remove_button.setVisible(False)
+
 
     def _request_rename(self) -> None:
         dialog = QInputDialog(self)
@@ -361,7 +370,7 @@ class SettingsDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("同步设置")
+        self.setWindowTitle("设置")
         self.setMinimumSize(680, 420)
         self.resize(720, 460)
         self._build_ui()
@@ -369,10 +378,11 @@ class SettingsDialog(QDialog):
     def _build_ui(self) -> None:
         self.menu_list = QListWidget()
         self.menu_list.setFixedWidth(150)
-        self.menu_list.addItems(["添加 Git", "同步设置", "软件设置", "关于"])
+        self.menu_list.addItems(["添加 Git", "Git 渠道", "同步设置", "软件设置", "关于"])
 
         self.pages = QStackedWidget()
         self.pages.addWidget(self._build_git_page())
+        self.pages.addWidget(self._build_channels_page())
         self.pages.addWidget(self._build_appearance_page())
         self.pages.addWidget(self._build_software_page())
         self.pages.addWidget(self._build_about_page())
@@ -385,8 +395,11 @@ class SettingsDialog(QDialog):
         content.addWidget(self.menu_list)
         content.addWidget(self.pages, 1)
 
-        self.close_button = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        self.close_button = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Close
+        )
         _compact_button_box(self.close_button)
+        self.close_button.accepted.connect(self.accept)
         self.close_button.rejected.connect(self.reject)
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -430,6 +443,111 @@ class SettingsDialog(QDialog):
         layout.addWidget(self.git_form, 1)
         self.git_form.show()
         return page
+
+    def _build_channels_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
+        layout.setSpacing(SPACE_2)
+        title = QLabel("Git 渠道")
+        title.setStyleSheet("font-size: 17px; font-weight: 700; color: #F4F7FB;")
+        layout.addWidget(title)
+        self._channels_container = QVBoxLayout()
+        self._channels_container.setContentsMargins(0, 0, 0, 0)
+        self._channels_container.setSpacing(SPACE_1)
+        layout.addLayout(self._channels_container)
+        layout.addStretch(1)
+        self._refresh_channels_list()
+        return page
+
+    def _refresh_channels_list(self) -> None:
+        while self._channels_container.count():
+            item = self._channels_container.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        parent = self.parent()
+        remotes = dict(parent.remotes) if parent and hasattr(parent, "remotes") else {}
+        if not remotes:
+            empty = QLabel("还没有配置 Git 渠道，请在“添加 Git”页添加。")
+            empty.setStyleSheet("color: #8A99AC; padding: 8px;")
+            self._channels_container.addWidget(empty)
+            return
+        for kind, remote in remotes.items():
+            row = QFrame()
+            row.setObjectName("channelCard")
+            row.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+            row.setStyleSheet(
+                f"QFrame#channelCard {{ background: {PANEL_RAISED}; border: 1px solid {BORDER_COLOR}; border-radius: 4px; }}"
+                f"QFrame#channelCard:hover {{ border-color: {ACCENT_COLOR}; }}"
+                "QLabel { border: 0; background: transparent; }"
+            )
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(SPACE_2, 10, SPACE_2, 10)
+            row_layout.setSpacing(SPACE_2)
+            name_label = QLabel(remote.label or kind)
+            name_label.setStyleSheet("font-weight: 600; color: #F4F7FB; font-size: 13px;")
+            type_label = QLabel(KIND_DISPLAY.get(kind, kind))
+            type_label.setStyleSheet("color: #7FA8B8; font-size: 13px;")
+            edit_btn = QPushButton("编辑")
+            edit_btn.setFixedHeight(34)
+            edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            edit_btn.setStyleSheet("QPushButton { padding: 0 16px; min-height: 0; max-height: 34px; font-size: 13px; }")
+            del_btn = QPushButton("删除")
+            del_btn.setFixedHeight(34)
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.setStyleSheet(
+                "QPushButton { padding: 0 16px; min-height: 0; max-height: 34px; font-size: 13px; color: #E88A8A; }"
+                "QPushButton:hover { color: #FFB0B0; border-color: #E88A8A; }"
+            )
+            edit_btn.clicked.connect(lambda checked, k=kind, r=remote: self._edit_channel(k, r))
+            del_btn.clicked.connect(lambda checked, k=kind, r=remote: self._delete_channel(k, r))
+            row_layout.addWidget(name_label, 2)
+            row_layout.addWidget(type_label, 1)
+            row_layout.addStretch(1)
+            row_layout.addWidget(edit_btn)
+            row_layout.addWidget(del_btn)
+            self._channels_container.addWidget(row)
+
+    def _edit_channel(self, kind: str, remote: RemoteConfig) -> None:
+        dialog = GitDialog(self, remote=remote)
+        if not dialog.exec():
+            return
+        parent = self.parent()
+        if not parent or not hasattr(parent, "remotes"):
+            return
+        new_remote = dialog.build_remote()
+        if new_remote.kind in {"github", "nas", "gitea"}:
+            new_remote.url = ""
+        parent.remotes[kind] = new_remote
+        parent.store.global_remotes = parent.remotes
+        for project in parent.projects:
+            project.remotes = parent.remotes
+        parent.store.save(parent.projects)
+        parent._render_cards(None)
+        self._refresh_channels_list()
+
+    def _delete_channel(self, kind: str, remote: RemoteConfig) -> None:
+        parent = self.parent()
+        if not parent or not hasattr(parent, "remotes"):
+            return
+        confirm = QMessageBox(self)
+        confirm.setWindowTitle("删除 Git 渠道")
+        confirm.setIcon(QMessageBox.Icon.Warning)
+        confirm.setText(f"确定删除渠道“{remote.label or kind}”吗？\n\n仅移除配置，不会删除远程仓库或本地文件。")
+        yes = confirm.addButton("删除", QMessageBox.ButtonRole.DestructiveRole)
+        confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        confirm.exec()
+        if confirm.clickedButton() is not yes:
+            return
+        del parent.remotes[kind]
+        parent.store.global_remotes = parent.remotes
+        for project in parent.projects:
+            project.remotes = parent.remotes
+        parent.store.save(parent.projects)
+        parent._reload_project_list()
+        parent._render_cards(None)
+        self._refresh_channels_list()
 
     def _build_appearance_page(self) -> QWidget:
         page = QWidget()

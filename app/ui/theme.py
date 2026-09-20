@@ -3,8 +3,9 @@ from __future__ import annotations
 import ctypes
 import sys
 
+from PyQt6.QtCore import QEvent, QObject, Qt
 from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QDialog
 
 # RepoPulse.png uses a deep navy canvas with a bright cyan signal mark.
 # Keep the same pairing throughout the application so the window and logo read
@@ -25,12 +26,23 @@ SPACE_3 = 12
 SPACE_4 = 16
 
 
+class _DarkTitleBarFilter(QObject):
+    """Force the dark title bar on every top-level dialog when it is shown."""
+
+    def eventFilter(self, obj, event):  # noqa: N802 - Qt API
+        if event.type() == QEvent.Type.Show and isinstance(obj, QDialog):
+            set_dark_title_bar(obj)
+        return False
+
+
 def apply_theme(app: QApplication) -> None:
     app.setFont(QFont("Microsoft YaHei UI", 10))
     app.setStyleSheet(
         """
         QWidget { color: #E8ECF2; background: #071D2C; }
         QMainWindow, QDialog { background: #071D2C; }
+        QListWidget, QPushButton, QCheckBox, QComboBox, QLineEdit, QTreeWidget,
+        QTableWidget, QTabBar, QToolButton, QMenu { outline: none; }
         QLabel { background: transparent; }
         QMenuBar { background: #071D2C; color: #E8ECF2; padding: 4px 6px; }
         QMenuBar::item { padding: 6px 10px; border-radius: 4px; }
@@ -63,6 +75,9 @@ def apply_theme(app: QApplication) -> None:
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
         """
     )
+    # Keep a strong reference so the filter is not garbage-collected (pitfall 18).
+    app._dark_title_bar_filter = _DarkTitleBarFilter(app)
+    app.installEventFilter(app._dark_title_bar_filter)
 
 
 def set_dark_title_bar(window) -> None:

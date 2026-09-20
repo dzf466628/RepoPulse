@@ -4,12 +4,9 @@ setlocal EnableExtensions
 set "APP_DIR=%~dp0"
 cd /d "%APP_DIR%"
 
-set "RUNNING_PID="
-for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$app = [IO.Path]::GetFullPath((Join-Path '%APP_DIR%' 'main.py')); $p = Get-CimInstance Win32_Process -Filter 'Name = ''python.exe''' | Where-Object { $_.CommandLine -match [regex]::Escape($app) }; if ($p) { $p[0].ProcessId }"`) do set "RUNNING_PID=%%P"
-if defined RUNNING_PID (
-    echo RepoPulse is already running. PID %RUNNING_PID%
-    exit /b 0
-)
+echo Cleaning up any existing RepoPulse process...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$app = [IO.Path]::GetFullPath((Join-Path '%APP_DIR%' 'main.py')); Get-CimInstance Win32_Process -Filter \"Name = 'python.exe'\" | Where-Object { $_.CommandLine -match [regex]::Escape($app) } | ForEach-Object { Write-Host ('Killing PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force }"
+timeout /t 1 /nobreak >nul
 
 set "PYTHON_EXE=%APP_DIR%.venv\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" (

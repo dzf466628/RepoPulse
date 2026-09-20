@@ -611,7 +611,11 @@ class GitService:
             if local.get("online") and result.get("online"):
                 if local.get("head") == result.get("head"):
                     result["relation"] = "一致"
+                    result["ahead"] = 0
+                    result["behind"] = 0
                 else:
+                    result["ahead"] = 0
+                    result["behind"] = 0
                     try:
                         counts = self._run(
                             ["rev-list", "--left-right", "--count", f"{local.get('head')}...{result.get('head')}"],
@@ -879,3 +883,52 @@ class GitService:
         if full_sync:
             self.log(f"{label}：已执行全量同步")
         return {"ok": True, "message": f"{label}：同步完成"}
+
+    def pull_to_local(self, project: ProjectConfig, progress: Callable[[], None] | None = None) -> list[dict]:
+        """从在线远程拉取最新提交到本地开发目录（只允许快进，不覆盖本地提交）。
+
+        拉取优先级：nas 优先，其他远程其次；本地领先时不产生任何改动。
+        """
+        source = Path(project.workspace_path).expanduser()
+        if not source.is_dir():
+            raise GitCommandError(f"本地项目目录不存在：{source}")
+        self._run(["rev-parse", "--show-toplevel"], cwd=source)
+        dirty = self._run(["status", "--porcelain"], cwd=source)
+        if dirty:
+            raise GitCommandError("工作区有未提交改动，请先提交或暂存后再拉取")
+        branch = project.default_branch or ""
+        if not branch:
+            try:
+                branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
+            except GitCommandError:
+                branch = "main"
+        branch = branch or "main"
+        remotes = list(project.remotes.values())
+        # nas 优先，其他远程其次，跳过 local 渠道
+        remotes.sort(key=lambda r: 0 if r.kind == "nas" else 1)
+        results: list[dict] = []
+        for remote in remotes:
+            if remote.kind == "local" or not remote.enabled:
+                continue
+            label = remote.label or remote.kind
+            target_url = remote.url or self.repository_url_for_project(remote, project.name)
+            try:
+                self.log(f"拉取 {label}：{self._mask_url(target_url)}")
+                self._run(
+                    ["fetch", "--quiet", target_url, branch],
+                    cwd=source,
+                    timeout=20,
+                    extra_env=self._auth_env(remote),
+                )
+                # 只快进：远程没有新提交时 merge 是 no-op；分叉时报错，不强行 reset
+                self._run(
+                    ["merge", "--ff-only", "FETCH_HEAD"],
+                    cwd=source,
+                    timeout=20,
+                )
+                results.append({"ok": True, "label": label, "message": f"{label}：已快进拉取最新"})
+            except GitCommandError as exc:
+                results.append({"ok": False, "label": label, "message": f"{label}：{exc}"})
+            if progress:
+                progress()
+        return results

@@ -124,6 +124,36 @@ class ProjectCreateWorker(QThread):
             self.completed.emit()
 
 
+class PullWorker(QThread):
+    result_ready = pyqtSignal(object)
+    log_message = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    completed = pyqtSignal()
+    progress_changed = pyqtSignal(int, int)
+
+    def __init__(self, project: ProjectConfig):
+        super().__init__()
+        self.project = project
+
+    def run(self) -> None:
+        try:
+            service = GitService(log=self.log_message.emit)
+            total = len([r for r in self.project.remotes.values() if r.kind != "local" and r.enabled])
+            self.progress_changed.emit(0, total)
+
+            def mark_complete() -> None:
+                nonlocal_done = [0]
+                nonlocal_done[0] += 1
+                self.progress_changed.emit(nonlocal_done[0], total)
+
+            results = service.pull_to_local(self.project, progress=mark_complete)
+            self.result_ready.emit(results)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.completed.emit()
+
+
 class ProjectDeleteWorker(QThread):
     result_ready = pyqtSignal(object)
     log_message = pyqtSignal(str)
