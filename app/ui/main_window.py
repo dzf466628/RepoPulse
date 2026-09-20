@@ -695,10 +695,7 @@ class MainWindow(QMainWindow):
             self.project_list.setCurrentRow(next_row)
 
     def _sync_from_floating(self) -> None:
-        if not self.isVisible():
-            self._show_main_from_floating()
-        self.raise_()
-        self.activateWindow()
+        # 悬浮窗同步：不把主窗口拉到前台，后台直接快速同步
         self._sync_current_project(quick=True)
 
     def moveEvent(self, event):  # noqa: N802 - Qt API
