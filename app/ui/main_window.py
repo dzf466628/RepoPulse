@@ -159,6 +159,70 @@ class BusyDialog(QDialog):
         super().closeEvent(event)
 
 
+STATE_SVG = {
+    "clean": (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+        'stroke="{color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">'
+        '<polyline points="20 6 9 17 4 12"/></svg>'
+    ),
+    "warning": (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+        'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
+        '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>'
+        '<line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
+    ),
+    "error": (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+        'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
+        '<circle cx="12" cy="12" r="10"/>'
+        '<line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
+    ),
+    "different": (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+        'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
+        '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/>'
+        '<circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>'
+    ),
+    "waiting": (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+        'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
+        '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'
+    ),
+}
+
+STATE_COLORS = {
+    "clean": "#70D6A5",
+    "warning": "#F5C26B",
+    "error": "#F27788",
+    "different": "#9CC6FF",
+    "waiting": "#8A97AA",
+}
+
+
+def state_key_from_color(color: str) -> str:
+    c = (color or "").lower()
+    if c == "#70d6a5":
+        return "clean"
+    if c == "#f5c26b":
+        return "warning"
+    if c == "#f27788":
+        return "error"
+    if c == "#9cc6ff":
+        return "different"
+    return "waiting"
+
+
+def render_state_pixmap(state: str, color: str, size: int = 12) -> QPixmap:
+    svg = STATE_SVG.get(state, STATE_SVG["waiting"]).format(color=color)
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    renderer.render(painter)
+    painter.end()
+    return pm
+
+
 class StatusCard(QFrame):
     clicked = pyqtSignal(str)
     drag_started = pyqtSignal(str)
@@ -210,17 +274,27 @@ class StatusCard(QFrame):
         title_label.setStyleSheet(
             "font-size: 20px; font-weight: 700; color: #F4F7FB;"
         )
-        status_label = QLabel(status)
-        status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        status_label.setStyleSheet(
-            f"color: {status_color}; font-size: 11px; font-weight: 700; background: {PANEL_RAISED}; padding: 2px 8px; border-radius: 6px;"
+        status_badge = QFrame()
+        status_badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        status_badge.setStyleSheet(
+            f"QFrame {{ background: {PANEL_RAISED}; border-radius: 6px; }}"
         )
-        status_label.setContentsMargins(0, 0, 0, 0)
-        status_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        badge_layout = QHBoxLayout(status_badge)
+        badge_layout.setContentsMargins(6, 2, 8, 2)
+        badge_layout.setSpacing(4)
+        state_key = state_key_from_color(status_color)
+        icon_label = QLabel()
+        icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        icon_label.setPixmap(render_state_pixmap(state_key, status_color, 12))
+        text_label = QLabel(status)
+        text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        text_label.setStyleSheet(f"color: {status_color}; font-size: 11px; font-weight: 700; background: transparent;")
+        badge_layout.addWidget(icon_label)
+        badge_layout.addWidget(text_label)
         title_label.setMinimumWidth(60)
         title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         header.addWidget(title_label, 1)
-        header.addWidget(status_label)
+        header.addWidget(status_badge)
         layout.addLayout(header)
 
         title_label.setWordWrap(True)
