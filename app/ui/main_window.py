@@ -699,7 +699,7 @@ class MainWindow(QMainWindow):
             self._show_main_from_floating()
         self.raise_()
         self.activateWindow()
-        self._sync_current_project()
+        self._sync_current_project(quick=True)
 
     def moveEvent(self, event):  # noqa: N802 - Qt API
         super().moveEvent(event)
@@ -1899,6 +1899,14 @@ class MainWindow(QMainWindow):
         self._append_log(f"项目已重命名为：{name}")
 
     def _delete_from_staging_detail(self, dialog, project) -> None:
+        """删除本地工作区文件夹，但保留 git 仓库与远程。"""
+        ws = Path(project.workspace_path)
+        if ws.is_dir() and len(str(ws)) > 5:
+            try:
+                shutil.rmtree(ws)
+            except Exception as exc:
+                QMessageBox.warning(self, "删除本地文件失败", str(exc))
+                return
         dialog.accept()
         self._delete_detail_project(project.project_id, "__staging__")
 
@@ -1977,7 +1985,7 @@ class MainWindow(QMainWindow):
         if self.busy_dialog is not None and message:
             self.busy_dialog.set_message(message)
 
-    def _sync_current_project(self) -> None:
+    def _sync_current_project(self, quick: bool = False) -> None:
         project = self._current_project()
         if not project:
             QMessageBox.information(self, "没有选中项目", "请先在左侧选择一个项目。")
@@ -1992,30 +2000,34 @@ class MainWindow(QMainWindow):
         has_changes = any(local.get(key, 0) for key in ("staged", "modified", "untracked", "conflicts"))
         commit_message = ""
         if has_changes:
-            default_message = f"更新项目：{project.name}"
-            commit_message, ok = QInputDialog.getText(
-                self,
-                "提交并同步",
-                "提交说明：",
-                text=default_message,
+            if quick:
+                commit_message = f"快速同步：{project.name}"
+            else:
+                default_message = f"更新项目：{project.name}"
+                commit_message, ok = QInputDialog.getText(
+                    self,
+                    "提交并同步",
+                    "提交说明：",
+                    text=default_message,
+                )
+                if not ok:
+                    return
+                commit_message = commit_message.strip() or default_message
+        if not quick:
+            confirm = QMessageBox(self)
+            confirm.setWindowTitle("确认提交并同步")
+            confirm.setIcon(QMessageBox.Icon.Question)
+            action_text = (
+                f"将先提交当前修改（{commit_message}），再同步到全部 Git 渠道。"
+                if commit_message
+                else "当前没有待提交修改，将直接同步已提交内容。"
             )
-            if not ok:
+            confirm.setText(f"确定处理“{project.name}”吗？\n\n{action_text}")
+            yes_button = confirm.addButton("提交并同步", QMessageBox.ButtonRole.AcceptRole)
+            confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            confirm.exec()
+            if confirm.clickedButton() is not yes_button:
                 return
-            commit_message = commit_message.strip() or default_message
-        confirm = QMessageBox(self)
-        confirm.setWindowTitle("确认提交并同步")
-        confirm.setIcon(QMessageBox.Icon.Question)
-        action_text = (
-            f"将先提交当前修改（{commit_message}），再同步到全部 Git 渠道。"
-            if commit_message
-            else "当前没有待提交修改，将直接同步已提交内容。"
-        )
-        confirm.setText(f"确定处理“{project.name}”吗？\n\n{action_text}")
-        yes_button = confirm.addButton("提交并同步", QMessageBox.ButtonRole.AcceptRole)
-        confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        confirm.exec()
-        if confirm.clickedButton() is not yes_button:
-            return
         self._start_sync(project, commit_message)
 
     def _set_sync_busy(self, busy: bool) -> None:
@@ -2288,7 +2300,18 @@ class MainWindow(QMainWindow):
             f"QProgressBar::chunk {{ background: {chunk}; border-radius: 3px; }}"
         )
 
+    def _should_skip_busy_dialog(self) -> bool:
+        """主窗口最小化/托盘隐藏，或悬浮窗被拖出槽位时，不弹模态等待框。"""
+        if self.isMinimized() or not self.isVisible():
+            return True
+        fw = getattr(self, "floating", None)
+        if fw is not None and not getattr(fw, "docked", True) and fw.isVisible():
+            return True
+        return False
+
     def _show_busy_dialog(self, message: str) -> None:
+        if self._should_skip_busy_dialog():
+            return
         if self.busy_dialog is None:
             self.busy_dialog = BusyDialog(self)
         self.busy_dialog.set_message(message)

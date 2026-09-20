@@ -387,7 +387,7 @@ class RepositoryDetailDialog(QDialog):
         confirm.setIcon(QMessageBox.Icon.Warning)
         confirm.setText(
             "确定删除这个项目吗？\n\n"
-            "仅从 RepoPulse 中移除该项目，不会删除本地工作区文件。"
+            "将删除本地工作区文件夹，但保留本地 git 备份仓与 NAS/GitHub 远程仓库，之后可从 git 恢复。"
         )
         yes = confirm.addButton("确认删除", QMessageBox.ButtonRole.DestructiveRole)
         confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
