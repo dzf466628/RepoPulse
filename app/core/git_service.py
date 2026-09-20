@@ -548,7 +548,7 @@ class GitService:
         if branch:
             output = self._run(
                 ["ls-remote", target_url, f"refs/heads/{branch}"],
-                timeout=20,
+                timeout=10,
                 extra_env=auth_env,
             )
             return (output.split()[0] if output else ""), branch
@@ -672,7 +672,7 @@ class GitService:
             self._run(
                 ["fetch", "--no-tags", "--quiet", effective_url, branch],
                 cwd=path,
-                timeout=45,
+                timeout=20,
                 extra_env=self._auth_env(remote),
             )
             counts = self._run(["rev-list", "--left-right", "--count", "HEAD...FETCH_HEAD"], cwd=path)
