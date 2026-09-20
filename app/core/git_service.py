@@ -41,6 +41,48 @@ _FULL_EXCLUDE_FILES = [
     "Thumbs.db", ".DS_Store", "*.swp",
 ]
 
+# 新项目首次提交时自动生成的 .gitignore（避免把 .venv/node_modules 等临时目录纳入版本库）
+_DEFAULT_GITIGNORE = """\
+# RepoPulse 自动生成
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# 构建产物
+build/
+dist/
+out/
+target/
+*.spec
+
+# IDE / 编辑器
+.idea/
+.vscode/
+.vs/
+*.swp
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+"""
+
 
 class GitService:
     def __init__(self, log: Callable[[str], None] | None = None):
@@ -99,6 +141,15 @@ class GitService:
                 detail = (direct_result.stderr or direct_result.stdout).strip()
             raise GitCommandError(detail or f"Git 返回错误码 {result.returncode}")
         return result.stdout.strip()
+
+    def _github_reachable(self) -> bool:
+        """快速探测本地 GitHub 代理端口是否开启（2 秒），不通就跳过 GitHub。"""
+        import socket
+        try:
+            with socket.create_connection(("127.0.0.1", 11304), timeout=2):
+                return True
+        except OSError:
+            return False
 
     def _auth_env(self, remote: RemoteConfig) -> dict[str, str]:
         """为单次 Git 命令准备认证环境，不把密码拼进仓库地址。"""
@@ -164,8 +215,17 @@ class GitService:
             headers["Authorization"] = f"token {remote.secret}"
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(url, headers=headers, method=method, data=body)
+        proxy_url = "http://127.0.0.1:11304"
+        if remote.kind == "github":
+            # GitHub API 必须显式走本地代理，否则 urllib 直连会被墙卡死
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+            )
+        else:
+            # NAS / 局域网 Gitea 直连，绕过系统代理
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with opener.open(request, timeout=20) as response:
                 raw = response.read()
                 return json.loads(raw.decode("utf-8")) if raw else {}
         except urllib.error.HTTPError as exc:
@@ -176,7 +236,7 @@ class GitService:
                 # back from Gitea token auth to username/password Basic auth.
                 retry = urllib.request.Request(url, headers=headers, method=method, data=body)
                 try:
-                    with urllib.request.urlopen(retry, timeout=20) as response:
+                    with opener.open(retry, timeout=20) as response:
                         raw = response.read()
                         return json.loads(raw.decode("utf-8")) if raw else {}
                 except urllib.error.HTTPError as retry_exc:
@@ -336,15 +396,20 @@ class GitService:
         if not (source / ".git").is_dir():
             self.log(f"初始化项目 Git：{source}")
             self._run(["init", "-b", branch], cwd=source)
+        # 首次提交前补一份 .gitignore，避免把 .venv/node_modules 等临时目录纳入版本库
+        gitignore = source / ".gitignore"
+        if not gitignore.exists():
+            gitignore.write_text(_DEFAULT_GITIGNORE, encoding="utf-8")
         has_head = False
         try:
             has_head = bool(self._run(["rev-parse", "--verify", "HEAD"], cwd=source))
         except GitCommandError:
             pass
         if not has_head:
-            if not any(item.name != ".git" for item in source.iterdir()):
+            if not any(item.name not in {".git", ".gitignore"} for item in source.iterdir()):
                 (source / "README.md").write_text(f"# {project.name}\n", encoding="utf-8")
-            self._run(["add", "-A"], cwd=source)
+            # 大目录（含 node_modules 等）add 可能超过默认 20s，给足时间
+            self._run(["add", "-A"], cwd=source, timeout=180)
             try:
                 self._run(["config", "user.name"], cwd=source)
             except GitCommandError:
@@ -353,7 +418,7 @@ class GitService:
                 self._run(["config", "user.email"], cwd=source)
             except GitCommandError:
                 self._run(["config", "user.email", "repopulse@local"], cwd=source)
-            self._run(["commit", "-m", "chore: initialize project"], cwd=source)
+            self._run(["commit", "-m", "chore: initialize project"], cwd=source, timeout=180)
         if progress:
             progress()
 
@@ -361,6 +426,12 @@ class GitService:
         for key, remote in project.remotes.items():
             label = remote.label or remote.kind
             remote.branch = remote.branch or branch
+            if remote.kind == "github" and not self._github_reachable():
+                self.log(f"{label}：代理未开启，已跳过（不影响本地/NAS）")
+                errors.append(f"{label}：代理未开启，已跳过")
+                if progress:
+                    progress()
+                continue
             try:
                 if remote.kind == "local":
                     target = self.local_channel_path(remote, project) if remote.path else None
@@ -373,7 +444,7 @@ class GitService:
                         self.log(f"创建 {label} 项目目录：{target}")
                         # Source and Local Git may be on different Windows drives;
                         # --local relies on same-filesystem hardlinks and fails there.
-                        self._run(["clone", "--no-local", str(source), str(target)], timeout=60)
+                        self._run(["clone", "--no-local", str(source), str(target)], timeout=600)
                     else:
                         self.log(f"{label} 项目目录已存在，继续使用：{target}")
                     # Keep the configured Local Git path as the shared
@@ -520,10 +591,24 @@ class GitService:
             "error": "",
         }
         if not path.exists():
-            result["error"] = "本地路径不存在"
+            # 目录尚未创建（新建项目还没落盘）：视为"未创建"，点同步会自动 mkdir + init
+            result["uncreated"] = True
+            result["hint"] = "目录尚未创建，点击同步将自动创建并初始化 Git 仓库"
             return result
+        # 识别"未创建"：不是 Git 仓库，或已 init 但还没有任何提交
         try:
             self._run(["rev-parse", "--show-toplevel"], cwd=path)
+        except GitCommandError:
+            result["uncreated"] = True
+            result["hint"] = "尚未初始化 Git 仓库，点击同步将自动创建"
+            return result
+        try:
+            self._run(["rev-parse", "--verify", "HEAD"], cwd=path)
+        except GitCommandError:
+            result["uncreated"] = True
+            result["hint"] = "仓库尚未有任何提交，点击同步将自动初始化并首次提交"
+            return result
+        try:
             porcelain = self._run(["status", "--porcelain=v2", "--branch"], cwd=path)
             for line in porcelain.splitlines():
                 if line.startswith("# branch.head "):
@@ -806,6 +891,17 @@ class GitService:
         results: list[dict] = []
         for key, remote in project.remotes.items():
             label = remote.label or remote.kind
+            if remote.kind == "github" and not self._github_reachable():
+                result = {"ok": False, "skipped": True,
+                          "message": f"{label}：代理未开启，已跳过（不影响本地/NAS）"}
+                result["key"] = key
+                result["label"] = label
+                results.append(result)
+                if on_channel_finish:
+                    on_channel_finish(key, False)
+                if progress:
+                    progress()
+                continue
             if on_channel_start:
                 on_channel_start(key)
             try:

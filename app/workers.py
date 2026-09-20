@@ -66,6 +66,37 @@ class SyncWorker(QThread):
         try:
             service = GitService(log=self.log_message.emit)
             local = service.local_status(self.project)
+            # 未创建的新项目：同步时自动 init + 首次提交 + 建远程仓库
+            if local.get("uncreated"):
+                self.log_message.emit("检测到新项目，自动初始化 Git 仓库并创建远程仓库")
+                total = 1 + len(self.project.remotes)
+                completed = 0
+                self.progress_changed.emit(0, total)
+
+                def mark_complete() -> None:
+                    nonlocal completed
+                    completed += 1
+                    self.progress_changed.emit(completed, total)
+
+                prepared = service.prepare_project(self.project, progress=mark_complete)
+                errors = list(prepared.get("errors", []))
+                # prepare_project 返回的是 errors 列表，转成标准 results 结构，
+                # 让 _on_sync_result 能正确统计失败渠道
+                results = [{
+                    "ok": not errors,
+                    "message": "本地仓库初始化完成" if not errors else "本地仓库已初始化，但有 Git 渠道未完成",
+                    "key": "__local__",
+                    "label": "本地",
+                }]
+                for err in errors:
+                    results.append({"ok": False, "message": err, "key": "", "label": ""})
+                self.result_ready.emit({
+                    "project_id": self.project.project_id,
+                    "results": results,
+                    "created": True,
+                    "project": prepared.get("project", self.project),
+                })
+                return
             needs_commit = bool(self.commit_message) or not local.get("clean", False)
             total = len(self.project.remotes) + (1 if needs_commit else 0)
             completed = 0
@@ -172,6 +203,32 @@ class ProjectDeleteWorker(QThread):
         try:
             service = GitService(log=self.log_message.emit)
             self.result_ready.emit(service.delete_project(self.project))
+        except Exception as exc:  # pragma: no cover
+            self.failed.emit(str(exc))
+        finally:
+            self.completed.emit()
+
+
+class LocalStatusWorker(QThread):
+    """轻量只读本地仓库状态（暂存区），不查远程。
+
+    用于新建项目、选中未开启同步的项目时，快速把"未创建/暂存区"卡片渲染出来，
+    不必走完整的 StatusWorker（那只会处理 sync_enabled=True 的项目）。
+    """
+
+    local_ready = pyqtSignal(str, dict)
+    failed = pyqtSignal(str)
+    completed = pyqtSignal()
+
+    def __init__(self, project: ProjectConfig):
+        super().__init__()
+        self.project = project
+
+    def run(self) -> None:
+        try:
+            service = GitService()
+            local = service.local_status(self.project)
+            self.local_ready.emit(self.project.project_id, local)
         except Exception as exc:  # pragma: no cover
             self.failed.emit(str(exc))
         finally:

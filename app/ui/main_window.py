@@ -68,7 +68,14 @@ from app.ui.theme import (
     SPACE_3,
     set_dark_title_bar,
 )
-from app.workers import ProjectCreateWorker, ProjectDeleteWorker, PullWorker, StatusWorker, SyncWorker
+from app.workers import (
+    LocalStatusWorker,
+    ProjectCreateWorker,
+    ProjectDeleteWorker,
+    PullWorker,
+    StatusWorker,
+    SyncWorker,
+)
 
 
 def _settings_icon() -> QIcon:
@@ -763,6 +770,7 @@ class MainWindow(QMainWindow):
         self.sync_worker: SyncWorker | None = None
         self.pull_worker: PullWorker | None = None
         self.create_worker: ProjectCreateWorker | None = None
+        self.local_status_worker: LocalStatusWorker | None = None
         self.quick_buttons: list[QPushButton] = []
         self.card_widgets: dict[str, StatusCard] = {}
         self.selected_git_key: str | None = None
@@ -1624,6 +1632,37 @@ class MainWindow(QMainWindow):
             return
         self.selected_git_key = None
         self._render_cards(self.results.get(project.project_id))
+        # 未开启同步的项目没有完整检查结果，轻量读一次本地暂存区状态（显示"未创建/干净/有改动"）
+        if project.project_id not in self.results:
+            self._refresh_local_status(project)
+
+    def _refresh_local_status(self, project: ProjectConfig) -> None:
+        """后台只读本地暂存区状态，不查远程。
+
+        用于新建项目、选中未开启同步的项目时，快速把"未创建/暂存区"卡片渲染出来，
+        不必走只处理 sync_enabled=True 的完整 StatusWorker。
+        """
+        if not project or not project.workspace_path:
+            return
+        if self.local_status_worker and self.local_status_worker.isRunning():
+            return
+        worker = LocalStatusWorker(project)
+        self.local_status_worker = worker
+        worker.local_ready.connect(lambda pid, local: self._on_local_status_ready(pid, local))
+        worker.failed.connect(lambda msg: self._append_log(f"读取本地状态失败：{msg}"))
+        worker.start()
+
+    def _on_local_status_ready(self, project_id: str, local: dict) -> None:
+        # 只覆盖 local 字段，保留该项目已有的远程检查数据
+        result = self.results.get(project_id) or {}
+        result["local"] = local
+        result.setdefault("remotes", {})
+        self.results[project_id] = result
+        selected = self._current_project()
+        # 同步左侧列表的状态图标（不会递归：此时 results 已有该项目，不会再触发读取）
+        self._reload_project_list(select_id=selected.project_id if selected else None)
+        if selected and selected.project_id == project_id:
+            self._render_cards(result)
 
     def _clear_view(self) -> None:
         self._render_cards(None)
@@ -1860,7 +1899,10 @@ class MainWindow(QMainWindow):
         return super().eventFilter(watched, event)
 
     def _build_staging_card(self, local: dict) -> StatusCard:
-        if not local:
+        if local.get("uncreated"):
+            status, color = "未创建", "#8A97AA"
+            body = local.get("hint") or "点击同步将自动创建仓库"
+        elif not local:
             status, color = "等待检查", "#A9B5C8"
             body = "未检查"
         elif local.get("error"):
@@ -1893,6 +1935,11 @@ class MainWindow(QMainWindow):
         }.get(remote.kind, "Remote Git · 远程 Git")
         _full = bool(self._sync_settings().get("full_sync", False))
         show_full = _full and remote.kind == "local"
+        cur_proj = self._current_project()
+        loc = (self.results.get(cur_proj.project_id, {}) or {}).get("local", {}) if cur_proj else {}
+        if loc.get("uncreated"):
+            return StatusCard(key, title, "", "未创建", "#8A97AA",
+                              "点击同步将自动创建此仓库", show_full=show_full)
         subtitle = {
             "local": "当前电脑上的本地仓库和提交记录",
             "nas": "NAS 上 Gitea 仓库的连接和同步状态",
@@ -2207,10 +2254,14 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "没有 Git 渠道", "当前项目还没有可同步的 Git 渠道。")
             return
         local = GitService().local_status(project)
-        if local.get("error"):
+        # 真正的读取错误才拦截；"未创建"是正常状态，走创建分支
+        if local.get("error") and not local.get("uncreated"):
             QMessageBox.warning(self, "无法提交", str(local.get("error")))
             return
-        has_changes = any(local.get(key, 0) for key in ("staged", "modified", "untracked", "conflicts"))
+        is_uncreated = bool(local.get("uncreated"))
+        has_changes = (not is_uncreated) and any(
+            local.get(key, 0) for key in ("staged", "modified", "untracked", "conflicts")
+        )
         commit_message = ""
         if has_changes:
             if quick:
@@ -2226,7 +2277,7 @@ class MainWindow(QMainWindow):
                 if not ok:
                     return
                 commit_message = commit_message.strip() or default_message
-        if not quick:
+        if not quick and not is_uncreated:
             confirm = QMessageBox(self)
             confirm.setWindowTitle("确认提交并同步")
             confirm.setIcon(QMessageBox.Icon.Question)
@@ -2241,7 +2292,7 @@ class MainWindow(QMainWindow):
             confirm.exec()
             if confirm.clickedButton() is not yes_button:
                 return
-        self._start_sync(project, commit_message)
+        self._start_sync(project, commit_message, creating=is_uncreated)
 
     def _set_sync_busy(self, busy: bool) -> None:
         for button in self.quick_buttons:
@@ -2312,8 +2363,8 @@ class MainWindow(QMainWindow):
         self._append_log("拉取完成。")
         self.refresh_selected(show_dialog=False)
 
-    def _start_sync(self, project: ProjectConfig, commit_message: str = "", automatic: bool = False) -> None:
-        self._set_floating_task("同步中…")
+    def _start_sync(self, project: ProjectConfig, commit_message: str = "", automatic: bool = False, creating: bool = False) -> None:
+        self._set_floating_task("创建仓库中…" if creating else "同步中…")
         if self.sync_worker and self.sync_worker.isRunning():
             return
         if self.worker and self.worker.isRunning():
@@ -2322,7 +2373,13 @@ class MainWindow(QMainWindow):
         self._auto_sync_delay_timer.stop()
         self._set_sync_busy(True)
         if not self._tray_sync_requested:
-            self._show_busy_dialog("正在提交并同步全部 Git 渠道" if commit_message else "正在同步全部 Git 渠道")
+            if creating:
+                busy_text = "正在创建 Git 仓库并同步到全部渠道"
+            elif commit_message:
+                busy_text = "正在提交并同步全部 Git 渠道"
+            else:
+                busy_text = "正在同步全部 Git 渠道"
+            self._show_busy_dialog(busy_text)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self._set_progress_style("running")
@@ -2437,7 +2494,8 @@ class MainWindow(QMainWindow):
         self.store.save(self.projects)
         self._reload_project_list(select_id=project.project_id)
         self._render_cards(None)
-        self._start_project_creation(project)
+        # 不自动创建仓库：先把暂存区显示为"未创建"，用户点同步按钮时再 init + 建远程
+        self._refresh_local_status(project)
 
     def _start_project_creation(self, project: ProjectConfig) -> None:
         if self.create_worker and self.create_worker.isRunning():
@@ -2636,8 +2694,13 @@ class MainWindow(QMainWindow):
 
     def refresh_selected(self, show_dialog: bool = True) -> None:
         project = self._current_project()
-        if project and project.sync_enabled:
+        if not project:
+            return
+        if project.sync_enabled:
             self._start_refresh([project], show_dialog=show_dialog)
+        else:
+            # 未开启同步的项目只轻量刷新本地暂存区状态（如刚创建完仓库）
+            self._refresh_local_status(project)
 
     def _start_refresh(self, projects: list[ProjectConfig], show_dialog: bool = True) -> None:
         projects = [project for project in projects if project.sync_enabled]
