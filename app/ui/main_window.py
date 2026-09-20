@@ -43,6 +43,7 @@ from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
 from app.ui.dialogs import GitDialog, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog
+from app.ui.floating_widget import FloatingStatusWidget
 from PyQt6.QtSvg import QSvgRenderer
 from app.ui.theme import (
     ACCENT_COLOR,
@@ -572,6 +573,8 @@ class MainWindow(QMainWindow):
         self._tray_sync_requested = False
         self._auto_sync_had_error = False
         self._allow_close = False
+        self._force_quit = False
+        QApplication.setQuitOnLastWindowClosed(False)
         self._setup_tray()
         set_dark_title_bar(self)
         self.store = ProjectStore()
@@ -601,7 +604,23 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._reload_project_list()
         self._apply_sync_settings()
+        self._build_floating_widget()
         QTimer.singleShot(250, self.refresh_all)
+
+    def _build_floating_widget(self) -> None:
+        self.floating = FloatingStatusWidget(self)
+        self.floating.sync_clicked.connect(self._sync_current_project)
+        self.floating.show()
+
+    def moveEvent(self, event):  # noqa: N802 - Qt API
+        super().moveEvent(event)
+        if hasattr(self, "floating"):
+            self.floating.follow_main_window()
+
+    def resizeEvent(self, event):  # noqa: N802 - Qt API
+        super().resizeEvent(event)
+        if hasattr(self, "floating"):
+            self.floating.follow_main_window()
 
     def _setup_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable() or self.app_icon.isNull():
@@ -665,9 +684,24 @@ class MainWindow(QMainWindow):
                 pass
 
     def _exit_from_tray(self) -> None:
+        self._force_quit = True
         self._stop_background_threads()
+        self._close_floating()
         self._allow_close = True
         self.close()
+        QApplication.quit()
+
+    def _close_floating(self) -> None:
+        if hasattr(self, "floating") and self.floating is not None:
+            try:
+                self.floating.close()
+            except Exception:
+                pass
+
+    def _show_main_from_floating(self) -> None:
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def _tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in {
@@ -698,9 +732,15 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt API
         if self._allow_close:
+            self._close_floating()
             if self.tray_icon:
                 self.tray_icon.hide()
             event.accept()
+            return
+        # 浮动窗脱离主窗口时，点 X 只隐藏主窗口，悬浮窗继续显示
+        if hasattr(self, "floating") and not self.floating.docked and not self._force_quit:
+            self.hide()
+            event.ignore()
             return
         prompt, close_to_tray = self._close_settings()
         can_tray = self.tray_icon is not None
@@ -1057,13 +1097,6 @@ class MainWindow(QMainWindow):
         name.setStyleSheet("color: #E8ECF2; background: transparent;")
         name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         state = self._overall_icon(result) if result else "waiting"
-        colors = {
-            "clean": "#70D6A5",
-            "warning": "#F5C26B",
-            "error": "#F27788",
-            "different": "#9CC6FF",
-            "waiting": "#8A97AA",
-        }
         status = QLabel()
         status.setFixedSize(16, 16)
         status.setToolTip({
@@ -1377,6 +1410,56 @@ class MainWindow(QMainWindow):
                 card = self._build_remote_card(key, remote, remote_result)
             self._add_card(key, card, index)
         self._update_pull_button_state()
+        self._update_floating_widget()
+
+    def _remote_state_key(self, remote, data) -> tuple[str, str]:
+        if not data:
+            return "waiting", "等待检查"
+        if data.get("ignored") and remote.kind == "github":
+            return "waiting", "GitHub 未代理，已忽略"
+        if data.get("error"):
+            return "error", str(data.get("error") or "连接失败")
+        if remote.kind == "local":
+            if not data.get("online"):
+                return "error", "本地目录读取失败"
+            if data.get("relation") == "一致":
+                return "clean", "本地一致"
+            return "warning", str(data.get("relation") or "版本不同")
+        if not data.get("online"):
+            return "error", "未连接"
+        relation = str(data.get("relation") or "已连接")
+        if relation == "一致":
+            return "clean", "一致"
+        return "different", relation
+
+    def _update_floating_widget(self) -> None:
+        fw = getattr(self, "floating", None)
+        if fw is None:
+            return
+        project = self._current_project()
+        if not project:
+            fw.set_project_state("", "waiting", STATE_COLORS["waiting"],
+                                 render_state_pixmap("waiting", STATE_COLORS["waiting"], 16))
+            for key in ("local", "nas", "github"):
+                fw.set_repo_state(key, None, "")
+            fw.set_sync_enabled(False)
+            return
+        result = self.results.get(project.project_id, {})
+        state = self._overall_icon(result) if result else "waiting"
+        color = STATE_COLORS.get(state, STATE_COLORS["waiting"])
+        fw.set_project_state(project.name, state, color, render_state_pixmap(state, color, 16))
+        remotes_data = result.get("remotes", {}) if result else {}
+        for key in ("local", "nas", "github"):
+            remote = project.remotes.get(key)
+            data = remotes_data.get(key)
+            if remote is None:
+                fw.set_repo_state(key, None, "未配置")
+                continue
+            rk, tip = self._remote_state_key(remote, data)
+            fw.set_repo_state(key, render_state_pixmap(rk, STATE_COLORS.get(rk, STATE_COLORS["waiting"]), 14),
+                              f"{remote.label or key}：{tip}")
+        busy = self.worker is not None and self.worker.isRunning()
+        fw.set_sync_enabled(bool(project.sync_enabled) and not busy)
 
     def _add_card(self, key: str, card: StatusCard, index: int) -> None:
         card.clicked.connect(self._select_card)
@@ -1818,6 +1901,7 @@ class MainWindow(QMainWindow):
             return
         self._auto_sync_delay_timer.stop()
         self._set_busy(True)
+        self._set_floating_task("拉取中…")
         self._show_busy_dialog("正在从远程拉取最新提交")
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -1843,6 +1927,7 @@ class MainWindow(QMainWindow):
         self.refresh_selected(show_dialog=False)
 
     def _start_sync(self, project: ProjectConfig, commit_message: str = "", automatic: bool = False) -> None:
+        self._set_floating_task("同步中…")
         if self.sync_worker and self.sync_worker.isRunning():
             return
         if self.worker and self.worker.isRunning():
@@ -2109,10 +2194,20 @@ class MainWindow(QMainWindow):
         self.settings_button.setEnabled(not busy)
         for button in self.quick_buttons:
             button.setEnabled(not busy)
+        fw = getattr(self, "floating", None)
+        if fw is not None and not busy:
+            fw.set_task("空闲")
+            self._update_floating_widget()
         if not busy:
             self._update_pull_button_state()
 
+    def _set_floating_task(self, text: str) -> None:
+        fw = getattr(self, "floating", None)
+        if fw is not None:
+            fw.set_task(text)
+
     def refresh_all(self) -> None:
+        self._set_floating_task("检查中…")
         self._start_refresh([project for project in self.projects if project.sync_enabled])
 
     def refresh_selected(self, show_dialog: bool = True) -> None:

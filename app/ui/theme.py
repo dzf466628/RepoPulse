@@ -3,7 +3,7 @@ from __future__ import annotations
 import ctypes
 import sys
 
-from PyQt6.QtCore import QEvent, QObject, Qt
+from PyQt6.QtCore import QEvent, QObject
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import QApplication, QDialog
 
