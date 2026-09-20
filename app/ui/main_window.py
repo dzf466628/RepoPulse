@@ -119,7 +119,7 @@ class BusyDialog(QDialog):
         self.setWindowTitle("请等待")
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setModal(True)
-        self.setFixedSize(270, 124)
+        self.setFixedSize(320, 160)  # 增加高度以容纳详细进度
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._message = "正在处理"
@@ -138,20 +138,33 @@ class BusyDialog(QDialog):
         self.message_label.setWordWrap(True)
         self.message_label.setMaximumHeight(34)
         self.message_label.setStyleSheet("color: #D7DFEB; font-size: 11px;")
-        progress = QProgressBar()
-        progress.setRange(0, 0)
-        progress.setTextVisible(False)
-        progress.setFixedHeight(6)
-        progress.setStyleSheet(
-            f"QProgressBar {{ background: {PANEL_RAISED}; border: 1px solid {BORDER_COLOR}; border-radius: 3px; }}"
+        
+        # 详细进度标签
+        self.detail_label = QLabel()
+        self.detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setStyleSheet("color: #A9B5C8; font-size: 10px;")
+        self.detail_label.setMaximumHeight(20)
+        self.detail_label.hide()  # 默认隐藏
+        
+        # 进度条（支持确定和不确定两种模式）
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)  # 不确定模式
+        self.progress.setTextVisible(True)
+        self.progress.setFixedHeight(10)
+        self.progress.setStyleSheet(
+            f"QProgressBar {{ background: {PANEL_RAISED}; border: 1px solid {BORDER_COLOR}; border-radius: 3px; "
+            "text-align: center; color: #D7DFEB; font-size: 9px; }}"
             f"QProgressBar::chunk {{ background: {ACCENT_COLOR}; border-radius: 3px; }}"
         )
+        
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE_3, SPACE_2, SPACE_3, SPACE_2)
         layout.setSpacing(SPACE_1)
         layout.addWidget(title)
         layout.addWidget(self.message_label)
-        layout.addWidget(progress)
+        layout.addWidget(self.detail_label)
+        layout.addWidget(self.progress)
         self.setStyleSheet(
             f"QDialog {{ background: {PANEL_COLOR}; border: 1px solid {ACCENT_DARK}; border-radius: 12px; }}"
         )
@@ -160,6 +173,29 @@ class BusyDialog(QDialog):
         self._message = (message.strip() or "正在处理")[:48]
         self._dot_count = 0
         self._animate()
+
+    def set_detailed_progress(self, task_name: str, current: int, total: int, detail: str) -> None:
+        """设置详细进度"""
+        self._timer.stop()  # 停止动画
+        self.message_label.setText(task_name)
+        self.detail_label.setText(detail)
+        self.detail_label.show()
+        if total > 0:
+            self.progress.setRange(0, total)
+            self.progress.setValue(current)
+            percentage = int(current * 100 / total) if total > 0 else 0
+            self.progress.setFormat(f"{percentage}%")
+        else:
+            # 没有总数，显示不确定进度
+            self.progress.setRange(0, 0)
+            self.progress.setFormat("")
+
+    def reset_to_indeterminate(self) -> None:
+        """重置为不确定进度模式"""
+        self.detail_label.hide()
+        self.progress.setRange(0, 0)
+        self.progress.setFormat("")
+        self._timer.start()
 
     def _animate(self) -> None:
         self.message_label.setText(f"{self._message}{'.' * self._dot_count}")
@@ -1706,10 +1742,14 @@ class MainWindow(QMainWindow):
         self._update_floating_widget()
 
     def _remote_state_key(self, remote, data) -> tuple[str, str]:
+        
         if not data:
             return "waiting", "等待检查"
         if data.get("ignored") and remote.kind == "github":
             return "waiting", "GitHub 未代理，已忽略"
+        # 远程仓库尚不存在（如 404）时，提示同步会自动创建
+        if data.get("not_created") or data.get("uncreated") or data.get("relation") == "待创建":
+            return "waiting", "待创建"
         if data.get("error"):
             return "error", str(data.get("error") or "连接失败")
         if remote.kind == "local":
@@ -1723,6 +1763,9 @@ class MainWindow(QMainWindow):
         relation = str(data.get("relation") or "已连接")
         if relation == "一致":
             return "clean", "一致"
+        # "待首次同步"也应该是灰色 waiting 状态
+        if relation == "待首次同步":
+            return "waiting", "待首次同步"
         return "different", relation
 
     def _update_floating_widget(self) -> None:
@@ -1947,20 +1990,31 @@ class MainWindow(QMainWindow):
         }.get(remote.kind, "其他远程 Git 仓库和同步状态")
         if not data:
             return StatusCard(key, title, subtitle, "等待检查", "#A9B5C8", "未检查", show_full=show_full)
-        if data.get("ignored") and remote.kind == "github":
-            return StatusCard(key, title, subtitle, "未代理", "#A9B5C8", "GitHub 连接失败，已按设置忽略", show_full=show_full)
-        if data.get("error"):
-            return StatusCard(key, title, subtitle, "连接失败", "#F27788", data["error"], show_full=show_full)
-        if remote.kind == "local":
-            if not data.get("online"):
-                status, color = "读取失败", "#F27788"
-            elif data.get("relation") == "一致":
-                status, color = "一致", "#70D6A5"
-            else:
-                status, color = data.get("relation", "版本不同"), "#F5C26B"
-        else:
-            status = data.get("relation", "已连接") if data.get("online") else "未连接"
-            color = "#70D6A5" if data.get("online") and status == "一致" else "#9CC6FF" if data.get("online") else "#F27788"
+        
+        # 使用 _remote_state_key 统一判断状态
+        state_key, state_text = self._remote_state_key(remote, data)
+        
+        # 根据状态设置颜色
+        color_map = {
+            "waiting": "#A9B5C8",  # 灰色
+            "clean": "#70D6A5",     # 绿色
+            "warning": "#F5C26B",   # 黄色
+            "error": "#F27788",     # 红色
+            "different": "#9CC6FF", # 蓝色
+        }
+        color = color_map.get(state_key, "#A9B5C8")
+        
+        # 如果是"待创建"状态，返回简化的卡片
+        if state_key == "waiting" and state_text in ["待创建", "待首次同步"]:
+            return StatusCard(key, title, subtitle, state_text, color,
+                              "点击同步将自动创建此仓库", show_full=show_full)
+        
+        # 如果是错误状态，返回错误信息
+        if state_key == "error":
+            error_msg = data.get("error") or state_text
+            return StatusCard(key, title, subtitle, state_text, color, error_msg, show_full=show_full)
+        
+        # 正常状态，显示详细信息
         last = data.get("last_commit", {})
         counts = ""
         if data.get("ahead") is not None:
@@ -1982,7 +2036,7 @@ class MainWindow(QMainWindow):
             key,
             title,
             subtitle,
-            status,
+            state_text,
             color,
             body,
             rich_body=True,
@@ -2253,15 +2307,35 @@ class MainWindow(QMainWindow):
         if not project.remotes:
             QMessageBox.information(self, "没有 Git 渠道", "当前项目还没有可同步的 Git 渠道。")
             return
-        local = GitService().local_status(project)
-        # 真正的读取错误才拦截；"未创建"是正常状态，走创建分支
-        if local.get("error") and not local.get("uncreated"):
-            QMessageBox.warning(self, "无法提交", str(local.get("error")))
-            return
-        is_uncreated = bool(local.get("uncreated"))
-        has_changes = (not is_uncreated) and any(
-            local.get(key, 0) for key in ("staged", "modified", "untracked", "conflicts")
-        )
+        
+        # 优先使用缓存的本地状态，避免在主线程阻塞调用 Git 命令
+        result = self.results.get(project.project_id, {})
+        local = result.get("local", {})
+        
+        # 如果缓存中没有状态（新项目或未刷新过），只做简单的目录检查，不执行 Git 命令
+        if not local:
+            workspace = Path(project.workspace_path).expanduser()
+            if not workspace.exists():
+                # 目录不存在，视为未创建
+                is_uncreated = True
+                has_changes = False
+            elif not (workspace / ".git").is_dir():
+                # 不是 Git 仓库，视为未创建
+                is_uncreated = True
+                has_changes = False
+            else:
+                # 是 Git 仓库但没有缓存状态，假设可能有修改，让 SyncWorker 去处理
+                is_uncreated = False
+                has_changes = True
+        else:
+            # 真正的读取错误才拦截；"未创建"是正常状态，走创建分支
+            if local.get("error") and not local.get("uncreated"):
+                QMessageBox.warning(self, "无法提交", str(local.get("error")))
+                return
+            is_uncreated = bool(local.get("uncreated"))
+            has_changes = (not is_uncreated) and any(
+                local.get(key, 0) for key in ("staged", "modified", "untracked", "conflicts")
+            )
         commit_message = ""
         if has_changes:
             if quick:
@@ -2401,6 +2475,7 @@ class MainWindow(QMainWindow):
         self.sync_worker.completed.connect(self._on_sync_completed)
         self.sync_worker.channel_started.connect(self._on_sync_channel_started)
         self.sync_worker.channel_finished.connect(self._on_sync_channel_finished)
+        self.sync_worker.detailed_progress.connect(self._on_detailed_progress)
         self.sync_worker.start()
 
     def _on_sync_channel_started(self, key: str) -> None:
@@ -2413,7 +2488,27 @@ class MainWindow(QMainWindow):
         fw = getattr(self, "floating", None)
         if fw is not None:
             fw.channel_finished(key, ok)
-            fw.set_overall_progress(self._sync_channels_done, self._sync_channels_total)
+
+    def _on_detailed_progress(self, task_name: str, current: int, total: int, detail: str) -> None:
+        """处理后台任务的细粒度进度（克隆/扫描/全量备份）。
+
+        只负责刷新界面；文字日志统一由 GitService.log 经 log_message 信号写入，
+        这里不再重复 append，避免不确定进度（total=0）下刷屏。
+        """
+        # 更新等待弹窗（total<=0 时弹窗自身切到不确定脉冲模式）
+        if self.busy_dialog and _qobj_alive(self.busy_dialog):
+            self.busy_dialog.set_detailed_progress(task_name, current, total, detail)
+
+        # 更新主进度条：只有拿到确定总数时才按百分比走
+        if total > 0:
+            percentage = max(0, min(100, int(current * 100 / total)))
+            self.progress_bar.setValue(percentage)
+
+        # 更新悬浮窗整体渠道进度（新建项目流程可能尚未初始化这两个计数，需兜底）
+        fw = getattr(self, "floating", None)
+        channels_total = getattr(self, "_sync_channels_total", 0)
+        if fw is not None and channels_total:
+            fw.set_overall_progress(getattr(self, "_sync_channels_done", 0), channels_total)
 
     def _on_sync_result(self, result: dict) -> None:
         failures = [item for item in result.get("results", []) if not item.get("ok")]
@@ -2516,6 +2611,7 @@ class MainWindow(QMainWindow):
         self.create_worker.result_ready.connect(self._on_project_created)
         self.create_worker.failed.connect(self._on_project_create_failed)
         self.create_worker.completed.connect(self._on_project_create_completed)
+        self.create_worker.detailed_progress.connect(self._on_detailed_progress)
         self.create_worker.start()
 
     def _on_project_created(self, result: dict) -> None:

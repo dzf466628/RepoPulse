@@ -5,6 +5,7 @@ import re
 import shutil
 import stat
 import subprocess
+import threading
 import base64
 import json
 import urllib.error
@@ -85,8 +86,9 @@ Thumbs.db
 
 
 class GitService:
-    def __init__(self, log: Callable[[str], None] | None = None):
+    def __init__(self, log: Callable[[str], None] | None = None, progress: Callable[[str, int, int, str], None] | None = None):
         self.log = log or (lambda _message: None)
+        self.progress = progress or (lambda _task, _current, _total, _detail: None)
         self.git = shutil.which("git") or "git"
 
     def _run(
@@ -95,7 +97,13 @@ class GitService:
         cwd: str | Path | None = None,
         timeout: int = 20,
         extra_env: dict[str, str] | None = None,
+        capture_progress: bool = False,
+        progress_task: str = "",
     ) -> str:
+        """执行 Git 命令，可选捕获进度输出"""
+        if capture_progress and progress_task:
+            return self._run_with_progress(args, cwd, timeout, extra_env, progress_task)
+        
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
         if extra_env:
@@ -141,6 +149,81 @@ class GitService:
                 detail = (direct_result.stderr or direct_result.stdout).strip()
             raise GitCommandError(detail or f"Git 返回错误码 {result.returncode}")
         return result.stdout.strip()
+
+    def _run_with_progress(
+        self,
+        args: list[str],
+        cwd: str | Path | None = None,
+        timeout: int = 20,
+        extra_env: dict[str, str] | None = None,
+        progress_task: str = "",
+    ) -> str:
+        """执行带进度的 Git 命令（clone/fetch --progress），实时解析 stderr 进度。
+
+        stdout、stderr 各用一个独立线程读取，既避免管道写满阻塞，也不和
+        communicate() 抢同一根管道；进度只从 stderr 解析，失败时保留完整 stderr。
+        """
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        if extra_env:
+            env.update(extra_env)
+        command = [self.git, *args]
+        process = subprocess.Popen(
+            command,
+            cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        progress_re = re.compile(
+            r"(Receiving|Compressing|Resolving|Counting)\s+objects:\s+(\d+)%\s+\((\d+)/(\d+)\)"
+        )
+
+        def pump_stdout() -> None:
+            for line in process.stdout:
+                stdout_chunks.append(line)
+
+        def pump_stderr() -> None:
+            for line in process.stderr:
+                stderr_chunks.append(line)
+                match = progress_re.search(line)
+                if match:
+                    stage = match.group(1)
+                    percentage = int(match.group(2))
+                    current = int(match.group(3))
+                    total = int(match.group(4))
+                    self.progress(
+                        progress_task,
+                        current,
+                        total,
+                        f"{stage} objects: {percentage}% ({current}/{total})",
+                    )
+
+        out_thread = threading.Thread(target=pump_stdout, daemon=True)
+        err_thread = threading.Thread(target=pump_stderr, daemon=True)
+        out_thread.start()
+        err_thread.start()
+
+        try:
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+            raise GitCommandError(f"命令超时（{timeout} 秒）：{' '.join(args)}")
+        out_thread.join(timeout=5)
+        err_thread.join(timeout=5)
+
+        if process.returncode != 0:
+            detail = "".join(stderr_chunks).strip() or "".join(stdout_chunks).strip()
+            raise GitCommandError(detail or f"Git 返回错误码 {process.returncode}")
+        return "".join(stdout_chunks).strip()
 
     def _github_reachable(self) -> bool:
         """快速探测本地 GitHub 代理端口是否开启（2 秒），不通就跳过 GitHub。"""
@@ -408,6 +491,55 @@ class GitService:
         if not has_head:
             if not any(item.name not in {".git", ".gitignore"} for item in source.iterdir()):
                 (source / "README.md").write_text(f"# {project.name}\n", encoding="utf-8")
+            
+            # 扫描大文件（>100MB），自动排除避免提交到 Git
+            LARGE_FILE_THRESHOLD = 100 * 1024 * 1024  # 100 MB
+            large_files = []
+            self.log("正在扫描项目文件（>100MB 的大文件将自动排除）...")
+            self.progress("扫描大文件", 0, 0, "正在扫描项目文件...")
+            
+            file_count = 0
+            try:
+                for file_path in source.rglob('*'):
+                    if not file_path.is_file():
+                        continue
+                    # 排除 .git 目录
+                    try:
+                        file_path.relative_to(source / ".git")
+                        continue
+                    except ValueError:
+                        pass
+                    
+                    file_count += 1
+                    # 每扫描 500 个文件更新一次进度
+                    if file_count % 500 == 0:
+                        self.log(f"已扫描 {file_count} 个文件...")
+                        self.progress("扫描大文件", 0, 0, f"已扫描 {file_count} 个文件...")
+                    
+                    try:
+                        if file_path.stat().st_size > LARGE_FILE_THRESHOLD:
+                            large_files.append(file_path.relative_to(source))
+                    except OSError:
+                        pass
+            except Exception:
+                pass  # 扫描失败不影响后续流程
+            
+            self.log(f"扫描完成，共 {file_count} 个文件")
+            self.progress("扫描大文件", 1, 1, f"扫描完成，共 {file_count} 个文件")
+            
+            if large_files:
+                # 追加大文件到 .gitignore
+                gitignore_content = gitignore.read_text(encoding="utf-8")
+                gitignore_content += "\n\n# 大文件自动排除（>100MB）\n"
+                for lf in large_files:
+                    gitignore_content += f"/{lf.as_posix()}\n"
+                gitignore.write_text(gitignore_content, encoding="utf-8")
+                
+                large_files_names = [lf.name for lf in large_files[:5]]
+                if len(large_files) > 5:
+                    large_files_names.append(f"... 等 {len(large_files)} 个文件")
+                self.log(f"已自动排除 {len(large_files)} 个大文件（>100MB）：{', '.join(large_files_names)}")
+            
             # 大目录（含 node_modules 等）add 可能超过默认 20s，给足时间
             self._run(["add", "-A"], cwd=source, timeout=180)
             try:
@@ -444,7 +576,12 @@ class GitService:
                         self.log(f"创建 {label} 项目目录：{target}")
                         # Source and Local Git may be on different Windows drives;
                         # --local relies on same-filesystem hardlinks and fails there.
-                        self._run(["clone", "--no-local", str(source), str(target)], timeout=600)
+                        self._run(
+                            ["clone", "--no-local", "--progress", str(source), str(target)],
+                            timeout=600,
+                            capture_progress=True,
+                            progress_task="克隆仓库"
+                        )
                     else:
                         self.log(f"{label} 项目目录已存在，继续使用：{target}")
                     # Keep the configured Local Git path as the shared
@@ -815,8 +952,15 @@ class GitService:
                     "subject": parts[3],
                 }
         except GitCommandError as exc:
-            result["error"] = str(exc)
-            result["relation"] = "连接失败"
+            error_msg = str(exc)
+            # 检测仓库不存在的错误（404 Not Found）
+            if any(keyword in error_msg.lower() for keyword in ["not found", "404", "does not exist", "repository not found"]):
+                result["error"] = ""
+                result["relation"] = "待创建"
+                result["not_created"] = True  # 标记为未创建状态
+            else:
+                result["error"] = error_msg
+                result["relation"] = "连接失败"
         return result
 
     def inspect_project(
@@ -908,8 +1052,7 @@ class GitService:
                 if remote.kind == "local":
                     result = self._sync_local_channel(source, branch, remote, project, label, full_sync=full_sync)
                 else:
-                    target_url = remote.url or self.repository_url_for_project(remote, project.name)
-                    result = self._sync_remote_channel(source, branch, remote, target_url, label, full_sync=full_sync)
+                    result = self._sync_remote_channel(source, branch, remote, project.name, label, full_sync=full_sync)
             except GitCommandError as exc:
                 result = {"ok": False, "message": f"{label}：{exc}"}
             result["key"] = key
@@ -951,33 +1094,77 @@ class GitService:
             "head": head,
         }
 
+    def _estimate_tree_size(self, root: Path) -> int:
+        """统计目录下未被全量镜像排除规则忽略的文件总字节数；读取失败返回 0。"""
+        total_size = 0
+        try:
+            for file_path in root.rglob("*"):
+                if not file_path.is_file():
+                    continue
+                excluded = False
+                for exclude_dir in _FULL_EXCLUDE_DIRS:
+                    try:
+                        file_path.relative_to(root / exclude_dir)
+                        excluded = True
+                        break
+                    except ValueError:
+                        continue
+                if excluded:
+                    continue
+                try:
+                    total_size += file_path.stat().st_size
+                except OSError:
+                    pass
+        except OSError:
+            return 0
+        return total_size
+
     def _mirror_workspace_full(self, source: Path, target: Path) -> None:
         """用 robocopy 把整个工作区镜像到全量本地仓库（含素材大文件，排除临时文件）。
 
         robocopy 退出码 0-7 均为成功（0=无拷贝，1=有拷贝，2/3=额外文件等），
         >=8 才是真正的错误。被 /XD 排除的目录既不复制也不在镜像模式下被删除，
         因此 target 自身的 .git 会被保留。
+
+        进度说明：robocopy 在管道重定向下只逐文件输出、且文本随系统语言本地化，
+        无法稳定解析出“整体百分比”，因此这里使用不确定进度（脉冲）+ 体量日志，
+        不伪造百分比；任务在后台线程执行，不会卡住界面。
         """
+        total_size = self._estimate_tree_size(source)
+        total_mb = total_size / (1024 * 1024) if total_size > 0 else 0
+        if total_mb > 0:
+            self.log(f"全量备份：准备复制约 {total_mb:.1f} MB")
+        else:
+            self.log("全量备份：开始镜像（大小未知）")
+        self.progress("全量备份", 0, 0, "正在镜像文件，请稍候...")
+
         cmd = [
             "robocopy", str(source), str(target),
-            "/MIR", "/NFL", "/NDL", "/NJH", "/NJS", "/NP",
+            "/MIR", "/NP", "/NFL", "/NDL", "/NJH", "/NJS",
+            "/R:3", "/W:5",
             "/XD", *_FULL_EXCLUDE_DIRS,
             "/XF", *_FULL_EXCLUDE_FILES,
         ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=600,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise GitCommandError("全量镜像超时（600 秒）") from exc
+
         if result.returncode >= 8:
             detail = (result.stderr or result.stdout or "").strip()
             raise GitCommandError(
                 f"全量镜像拷贝失败（robocopy 退出码 {result.returncode}）{detail}"
             )
+        self.progress("全量备份", 1, 1, "全量备份完成")
+        self.log("全量备份：完成")
 
     def _sync_local_channel(
         self,
@@ -1022,15 +1209,61 @@ class GitService:
             self._run(["checkout", "-B", branch, "FETCH_HEAD"], cwd=target, timeout=45)
         return {"ok": True, "message": f"{label}：同步完成"}
 
+    def _ensure_host_repository(
+        self,
+        remote: RemoteConfig,
+        project_name: str,
+        label: str,
+    ) -> tuple[str, bool]:
+        """同步前确保远程仓库存在，返回 (可推送地址, 是否本次新建)。
+
+        - 已显式配置仓库地址（remote.url）时直接使用，不做发现/创建；
+        - github / nas / gitea 渠道：先在账号下查找同名仓库，找不到就通过
+          服务接口自动创建，保证“待创建”的远程渠道点一次同步即可建好。
+        """
+        if remote.url:
+            return remote.url, False
+        if remote.kind not in {"github", "nas", "gitea"}:
+            return self.repository_url_for_project(remote, project_name), False
+
+        name = project_name.strip().removesuffix(".git")
+        wanted = name.casefold()
+        existing = None
+        try:
+            existing = next(
+                (
+                    item
+                    for item in self.discover_host_repositories(remote)
+                    if str(item.get("name") or "").casefold() == wanted
+                ),
+                None,
+            )
+        except GitCommandError:
+            # 列表接口不可用时保留新建路径，由创建接口抛出真实错误
+            existing = None
+        if existing:
+            url = str(
+                existing.get("clone_url")
+                or existing.get("url")
+                or self.repository_url_for_project(remote, name)
+            )
+            self.log(f"复用已有仓库：{label} / {name}")
+            return url, False
+
+        url = self.create_host_repository(remote, name)
+        self.log(f"{label}：远程仓库不存在，已自动创建：{name}")
+        return url, True
+
     def _sync_remote_channel(
         self,
         source: Path,
         branch: str,
         remote: RemoteConfig,
-        target_url: str,
+        project_name: str,
         label: str,
         full_sync: bool = False,
     ) -> dict:
+        target_url, created = self._ensure_host_repository(remote, project_name, label)
         if not target_url:
             return {"ok": False, "message": f"{label}：未配置仓库地址"}
         self.log(f"同步 {label}：{self._mask_url(target_url)}")
@@ -1042,6 +1275,8 @@ class GitService:
         )
         if full_sync:
             self.log(f"{label}：已执行全量同步")
+        if created:
+            return {"ok": True, "message": f"{label}：已创建仓库并推送完成"}
         return {"ok": True, "message": f"{label}：同步完成"}
 
     def pull_to_local(self, project: ProjectConfig, progress: Callable[[], None] | None = None) -> list[dict]:

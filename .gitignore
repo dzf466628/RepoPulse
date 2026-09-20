@@ -24,3 +24,12 @@ Thumbs.db
 .tmp/
 crash.txt
 
+
+# RepoPulse 开发期临时脚本与调试产物（一次性，不入库）
+/_p_*.py
+/debug_status.py
+/diagnose_new_project_status.py
+/verify_*.py
+/test_full_flow.py
+/_dock_check.png
+*.log

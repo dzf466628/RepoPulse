@@ -55,6 +55,7 @@ class SyncWorker(QThread):
     progress_changed = pyqtSignal(int, int)
     channel_started = pyqtSignal(str)
     channel_finished = pyqtSignal(str, bool)
+    detailed_progress = pyqtSignal(str, int, int, str)  # task_name, current, total, detail_text
 
     def __init__(self, project: ProjectConfig, commit_message: str = "", full_sync: bool = False):
         super().__init__()
@@ -64,7 +65,7 @@ class SyncWorker(QThread):
 
     def run(self) -> None:
         try:
-            service = GitService(log=self.log_message.emit)
+            service = GitService(log=self.log_message.emit, progress=self.detailed_progress.emit)
             local = service.local_status(self.project)
             # 未创建的新项目：同步时自动 init + 首次提交 + 建远程仓库
             if local.get("uncreated"):
@@ -134,6 +135,7 @@ class ProjectCreateWorker(QThread):
     failed = pyqtSignal(str)
     completed = pyqtSignal()
     progress_changed = pyqtSignal(int, int)
+    detailed_progress = pyqtSignal(str, int, int, str)  # task_name, current, total, detail_text
 
     def __init__(self, project: ProjectConfig):
         super().__init__()
@@ -141,7 +143,7 @@ class ProjectCreateWorker(QThread):
 
     def run(self) -> None:
         try:
-            service = GitService(log=self.log_message.emit)
+            service = GitService(log=self.log_message.emit, progress=self.detailed_progress.emit)
             total = 1 + len(self.project.remotes)
             completed = 0
             self.progress_changed.emit(0, total)
