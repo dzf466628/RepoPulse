@@ -247,8 +247,8 @@ class ProgressRing(QWidget):
         self.update()
 
     def _on_prog_done(self) -> None:
-        # 总环确定性填充到位：若结果已回来则立即收尾出符号
-        self._fill = 1.0
+        # 总环确定性填充到位：_fill 已由最后一帧 valueChanged 设为目标比例，
+        # 不再硬写 1.0。若结果已回来则立即收尾出符号。
         if self._pending is not None:
             self._resolve()
         self.update()
