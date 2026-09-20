@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
-from PyQt6.QtCore import QPoint, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
+from PyQt6.QtCore import QByteArray, QPoint, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
 from shiboken6 import isValid as _qobj_alive
 from PyQt6.QtWidgets import (
@@ -43,6 +43,7 @@ from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
 from app.ui.dialogs import GitDialog, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog
+from PyQt6.QtSvg import QSvgRenderer
 from app.ui.theme import (
     ACCENT_COLOR,
     ACCENT_DARK,
@@ -990,7 +991,7 @@ class MainWindow(QMainWindow):
             "waiting": "#8A97AA",
         }
         status = QLabel()
-        status.setFixedSize(12, 12)
+        status.setFixedSize(16, 16)
         status.setToolTip({
             "clean": "状态正常",
             "warning": "有待处理内容",
@@ -998,9 +999,7 @@ class MainWindow(QMainWindow):
             "different": "渠道版本不一致",
             "waiting": "等待检查",
         }.get(state, "等待检查"))
-        status.setStyleSheet(
-            f"background: {colors.get(state, colors['waiting'])}; border-radius: 6px;"
-        )
+        status.setPixmap(self._state_pixmap(state, 16))
         layout.addWidget(icon_slot)
         layout.addWidget(status)
         layout.addWidget(name, 1)
@@ -1161,6 +1160,55 @@ class MainWindow(QMainWindow):
 
     def _project_label(self, project: ProjectConfig, result: dict | None) -> str:
         return project.name
+
+    _STATE_SVG = {
+        "clean": (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+            'stroke="{color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">'
+            '<polyline points="20 6 9 17 4 12"/></svg>'
+        ),
+        "warning": (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+            'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
+            '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>'
+            '<line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'
+        ),
+        "error": (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+            'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
+            '<circle cx="12" cy="12" r="10"/>'
+            '<line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
+        ),
+        "different": (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+            'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
+            '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/>'
+            '<circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>'
+        ),
+        "waiting": (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+            'stroke="{color}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">'
+            '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'
+        ),
+    }
+
+    def _state_pixmap(self, state: str, size: int = 16) -> QPixmap:
+        colors = {
+            "clean": "#70D6A5",
+            "warning": "#F5C26B",
+            "error": "#F27788",
+            "different": "#9CC6FF",
+            "waiting": "#8A97AA",
+        }
+        color = colors.get(state, colors["waiting"])
+        svg = self._STATE_SVG.get(state, self._STATE_SVG["waiting"]).format(color=color)
+        renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        renderer.render(painter)
+        painter.end()
+        return pm
 
     def _overall_icon(self, result: dict) -> str:
         local = result.get("local", {})
