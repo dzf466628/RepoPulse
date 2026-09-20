@@ -907,18 +907,23 @@ class GitService:
             line for line in target_status.splitlines()
             if line and not line.startswith("?? ")
         ]
-        if tracked_dirty:
+        # 普通同步：目标仓库有别人/历史留下的已跟踪改动时，保护起来不覆盖。
+        # 全量同步：备份本就以 source 为准，下面会强制 reset 对齐代码，不跳过。
+        if tracked_dirty and not full_sync:
             return {"ok": False, "message": f"{label}：目标目录有已跟踪文件改动，已跳过"}
         if target_status:
             self.log(f"{label}：保留目标目录中的未跟踪文件，继续同步")
         self.log(f"同步 {label}：{target}")
         self._run(["fetch", "--quiet", str(source), branch], cwd=target, timeout=45)
-        self._run(["checkout", "-B", branch, "FETCH_HEAD"], cwd=target, timeout=45)
         if full_sync:
-            # 全量储存：把整个工作区（代码 + 素材大文件，排除临时/可再生成文件）
-            # 镜像到本仓库。target 自身的 .git 不参与镜像，保持不动。
+            # 全量储存：强制把已跟踪代码对齐到 source 最新提交（丢弃备份仓库自己的
+            # 脏改动，未跟踪的素材文件不受影响），再把整个工作区（代码 + 素材大文件，
+            # 排除临时/可再生成文件）镜像过来。target 自身的 .git 不参与镜像，保持不动。
+            self._run(["reset", "--hard", "FETCH_HEAD"], cwd=target, timeout=45)
             self._mirror_workspace_full(source, target)
             self.log(f"{label}：已全量镜像工作区（含素材大文件）")
+        else:
+            self._run(["checkout", "-B", branch, "FETCH_HEAD"], cwd=target, timeout=45)
         return {"ok": True, "message": f"{label}：同步完成"}
 
     def _sync_remote_channel(
