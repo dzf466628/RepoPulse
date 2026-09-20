@@ -10,6 +10,7 @@ from urllib.parse import quote, urlsplit, urlunsplit
 
 from PyQt6.QtCore import QPoint, QSettings, QTimer, QSize, Qt, QVariantAnimation, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
+from shiboken6 import isValid as _qobj_alive
 from PyQt6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -347,7 +348,7 @@ class ProjectListWidget(QListWidget):
             if row_widget is not None:
                 current_switch = row_widget.findChild(CapsuleSwitch)
         if self._hovered_switch is not current_switch:
-            if self._hovered_switch is not None:
+            if self._hovered_switch is not None and _qobj_alive(self._hovered_switch):
                 self._hovered_switch.set_hovered(False)
             self._hovered_switch = current_switch
         if current_switch is not None:
@@ -356,9 +357,9 @@ class ProjectListWidget(QListWidget):
 
     def leaveEvent(self, event) -> None:  # noqa: N802 - Qt API
         self.hover_row_changed.emit(-1)
-        if self._hovered_switch is not None:
+        if self._hovered_switch is not None and _qobj_alive(self._hovered_switch):
             self._hovered_switch.set_hovered(False)
-            self._hovered_switch = None
+        self._hovered_switch = None
         super().leaveEvent(event)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt API
