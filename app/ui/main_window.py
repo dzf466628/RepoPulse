@@ -2160,12 +2160,25 @@ class MainWindow(QMainWindow):
         self._repos_worker.failed.connect(on_failed)
         self._repos_worker.start()
 
+    def _delete_channel_repo_files(self, remote, name: str, project=None) -> str:
+        """删除单个渠道上的工程文件（local 删备份仓目录，远程删远程仓库）。
+        不动工作区和其他渠道。失败抛异常由调用方弹窗，成功返回日志文本。"""
+        label = remote.label or remote.kind
+        if remote.kind == "local":
+            if project is None:
+                raise RuntimeError("本地渠道删除缺少项目信息")
+            target = GitService().local_channel_path(remote, project)
+            if target.is_dir() and len(str(target)) > 5:
+                GitService._remove_tree(target)
+            return f"已删除本地备份仓：{target}"
+        GitService().delete_host_repository(remote, name)
+        return f"已删除 {label} 上的工程：{name}"
+
     def _delete_remote_repo(self, row: dict, remote, detail) -> None:
-        """未拉取仓库：确认后删除远程仓库并刷新列表。"""
+        """远程真实列表行：确认后删除该渠道工程并刷新列表。"""
         name = str(row.get("name") or "")
         try:
-            GitService().delete_host_repository(remote, name)
-            self._append_log(f"已删除远程仓库：{name}")
+            self._append_log(self._delete_channel_repo_files(remote, name))
         except Exception as exc:
             QMessageBox.warning(self, "删除失败", str(exc))
             return
@@ -2501,23 +2514,8 @@ class MainWindow(QMainWindow):
         remote = project.remotes.get(card_key) or self.remotes.get(card_key)
         if remote is None:
             return
-        label = remote.label or remote.kind
         try:
-            if remote.kind == "local":
-                target = GitService().local_channel_path(remote, project)
-                if target.is_dir() and len(str(target)) > 5:
-                    def _on_rm_error(func, path, _exc):
-                        import stat
-                        try:
-                            os.chmod(path, stat.S_IWRITE)
-                            func(path)
-                        except Exception:
-                            pass
-                    shutil.rmtree(target, onerror=_on_rm_error)
-                    self._append_log(f"已删除本地备份仓：{target}")
-            else:
-                GitService().delete_host_repository(remote, project.name)
-                self._append_log(f"已删除 {label} 上的工程：{project.name}")
+            self._append_log(self._delete_channel_repo_files(remote, project.name, project))
         except Exception as exc:
             QMessageBox.warning(self, "删除失败", str(exc))
             return
@@ -2531,10 +2529,11 @@ class MainWindow(QMainWindow):
         remote = self.remotes[key]
         if not confirm_delete_dialog(
             self,
-            "删除仓库卡片",
-            f"删除「{remote.label or remote.kind}」仓库卡片？",
-            "只删配置，不删文件和远程",
-            confirm_text="删除卡片",
+            "仓库卡片",
+            f"移除「{remote.label or remote.kind}」卡片？",
+            "只移除软件里的卡片配置；远程仓库和本地文件都不会被删除。",
+            level="info",
+            confirm_text="移除卡片",
         ):
             return
         self.remotes.pop(key, None)

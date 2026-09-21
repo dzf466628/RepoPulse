@@ -36,27 +36,42 @@ from app.core.git_service import GitCommandError, GitService
 
 
 def confirm_delete_dialog(
-    parent, title: str, summary: str, detail: str, confirm_text: str = "确认删除"
+    parent, title: str, summary: str, detail: str,
+    level: str = "warning", confirm_text: str = "删除",
 ) -> bool:
-    """统一的删除确认弹窗：红色粗体警告、紧凑、确认按钮红色、默认聚焦取消。"""
+    """统一删除确认弹窗：
+    level=critical 红叉【永久删除】/ warning 黄三角【删除】/ info 蓝 i【移除】。
+    统一宽度 340，高度自适应，确认按钮按等级配色，默认聚焦取消。"""
+    icon_map = {
+        "critical": QMessageBox.Icon.Critical,
+        "warning": QMessageBox.Icon.Warning,
+        "info": QMessageBox.Icon.Information,
+    }
+    prefix_map = {"critical": "【永久删除】", "warning": "【删除】", "info": "【移除】"}
+    btn_map = {
+        "critical": ("#C62828", "#E53935", "#FFFFFF"),
+        "warning": ("#E53935", "#FF5252", "#FFFFFF"),
+        "info": ("#16E5EE", "#4DF3FC", "#0B293B"),
+    }
     box = QMessageBox(parent)
-    box.setWindowTitle(title)
-    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle(prefix_map.get(level, "【删除】") + title)
+    box.setIcon(icon_map.get(level, QMessageBox.Icon.Warning))
     box.setText(summary)
     box.setInformativeText(detail)
     box.setStyleSheet(
-        "QLabel { color: #FF6B6B; font-size: 12px; font-weight: 700; }"
-        "QPushButton { min-width: 72px; padding: 4px 12px; }"
+        "QLabel { color: #FF6B6B; font-size: 13px; font-weight: 700; }"
+        "QPushButton { min-width: 76px; padding: 6px 16px; }"
     )
     yes = box.addButton(confirm_text, QMessageBox.ButtonRole.DestructiveRole)
     cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    bg, hover, fg = btn_map.get(level, btn_map["warning"])
     yes.setStyleSheet(
-        "QPushButton { background: #E53935; color: white; border: none; border-radius: 4px; padding: 4px 12px; }"
-        "QPushButton:hover { background: #FF5252; }"
+        f"QPushButton {{ background: {bg}; color: {fg}; border: none; border-radius: 4px; padding: 6px 16px; font-weight: 700; }}"
+        f"QPushButton:hover {{ background: {hover}; }}"
     )
     box.setDefaultButton(cancel)
     box.setEscapeButton(cancel)
-    box.setFixedWidth(300)
+    box.setFixedWidth(340)
     box.exec()
     return box.clickedButton() is yes
 from app.models import ProjectConfig, RemoteConfig
@@ -224,9 +239,11 @@ class ProjectDetailDialog(QDialog):
     def _confirm_delete(self) -> None:
         if not confirm_delete_dialog(
             self,
-            "!! 删除项目",
-            "确定删除这个项目吗？",
-            "删本地目录 + Local 备份 + NAS/GitHub 远程，不可恢复",
+            "项目",
+            "永久删除这个项目？",
+            "同时删除：本地工作目录、本地 Git 备份、所有远程仓库。不可恢复。",
+            level="critical",
+            confirm_text="永久删除",
         ):
             return
         self.delete_requested.emit()
@@ -420,9 +437,11 @@ class RepositoryDetailDialog(QDialog):
     def _confirm_delete_project(self) -> None:
         if not confirm_delete_dialog(
             self,
-            "!! 删除项目工作区",
-            "确定要删除这个项目吗？",
-            "删本地工作区文件夹，git 备份和远程保留",
+            "项目工作区",
+            "删除这个项目的本地工作目录？",
+            "只删开发目录里的代码；本地 Git 备份和所有远程仓库保留，可重新拉取。",
+            level="warning",
+            confirm_text="删除工作区",
         ):
             return
         self.delete_project_requested.emit()
@@ -604,10 +623,11 @@ class RepositoryDetailDialog(QDialog):
         name = str(row.get("name") or "")
         if not confirm_delete_dialog(
             self,
-            "!! 永久删除远程仓库",
-            f"永久删除远程仓库「{name}」？",
-            "只删本渠道（远程）仓库，本地文件和其他渠道不受影响",
-            confirm_text="永久删除",
+            "渠道工程",
+            f"删除该渠道上的「{name}」？",
+            "只删这一个渠道的工程；本地工作目录和其他渠道都保留。",
+            level="warning",
+            confirm_text="删除工程",
         ):
             return
         self.delete_remote_requested.emit(row)
@@ -645,10 +665,11 @@ class RepositoryDetailDialog(QDialog):
     def _confirm_delete(self, project_id: str, project_name: str) -> None:
         if not confirm_delete_dialog(
             self,
-            "删除渠道工程",
-            f"删除该渠道上的「{project_name}」？",
-            "只删该渠道的工程文件，本地工作区和其他渠道保留",
-            confirm_text="删除工程",
+            "渠道工程",
+            f"删除本地备份仓「{project_name}」？",
+            "只删本地 Git 备份仓；本地工作目录和其他渠道都保留。",
+            level="warning",
+            confirm_text="删除备份仓",
         ):
             return
         self.project_delete_requested.emit(project_id)
@@ -832,10 +853,11 @@ class SettingsDialog(QDialog):
             return
         if not confirm_delete_dialog(
             self,
-            "删除 Git 渠道",
-            f"删除渠道「{remote.label or kind}」？",
-            "只移除渠道配置，不删远程和本地文件",
-            confirm_text="删除渠道",
+            "Git 渠道",
+            f"移除渠道「{remote.label or kind}」？",
+            "只移除软件里的渠道配置；远程仓库和本地文件都不会被删除。",
+            level="info",
+            confirm_text="移除渠道",
         ):
             return
         del parent.remotes[kind]
