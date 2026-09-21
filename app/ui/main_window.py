@@ -2211,7 +2211,54 @@ class MainWindow(QMainWindow):
         # 选的文件夹名和项目名一致，直接用它作为根目录，不再新建一层
         target = root if root.name.casefold() == name.casefold() else root / name
         if target.exists():
-            QMessageBox.warning(self, "拉取", f"目录已存在：\n{target}\n\n已有项目请直接用'拉取'更新，不要重复拉取。")
+            if (target / ".git").is_dir():
+                # 已有 git 仓库：直接关联为项目，不重复 clone
+                project = ProjectConfig(
+                    project_id=uuid.uuid4().hex,
+                    name=name,
+                    workspace_path=str(target),
+                    default_branch=str(row.get("default_branch") or "main"),
+                    remotes=self.remotes,
+                )
+                self.projects.append(project)
+                self.store.save(self.projects)
+                self._reload_project_list(select_id=project.project_id)
+                self._render_cards(None)
+                self._append_log(f"已关联已有项目目录：{target}")
+                return
+            # 已有目录但不是 git 仓库：自动 init + 关联远程 + 拉取
+            from app.workers import CompleteRepoWorker
+            clone_url = str(row.get("clone_url") or "")
+            if not clone_url and remote is not None:
+                clone_url = getattr(remote, "service_url", "") or ""
+            if not clone_url:
+                QMessageBox.warning(self, "拉取", "该仓库没有可用的 clone 地址。")
+                return
+            branch = str(row.get("default_branch") or "main")
+            self._show_busy_dialog(f"正在完善 {name}")
+            self._append_log(f"正在把已有目录完善成 git 仓库：{target}")
+            self._complete_worker = CompleteRepoWorker(clone_url, str(target), branch)
+
+            def on_completed(dir_str: str) -> None:
+                project = ProjectConfig(
+                    project_id=uuid.uuid4().hex,
+                    name=name,
+                    workspace_path=dir_str,
+                    default_branch=branch,
+                    remotes=self.remotes,
+                )
+                self.projects.append(project)
+                self.store.save(self.projects)
+                self._reload_project_list(select_id=project.project_id)
+                self._render_cards(None)
+                self._hide_busy_dialog()
+                self._append_log(f"已完善并关联项目：{dir_str}")
+
+            self._complete_worker.log_message.connect(self._append_log)
+            self._complete_worker.detailed_progress.connect(self._on_detailed_progress)
+            self._complete_worker.completed.connect(on_completed)
+            self._complete_worker.failed.connect(lambda m: (self._hide_busy_dialog(), self._append_log(f"完善失败：{m}")))
+            self._complete_worker.start()
             return
         clone_url = str(row.get("clone_url") or "")
         if not clone_url and remote is not None:
@@ -2450,13 +2497,32 @@ class MainWindow(QMainWindow):
             self._reload_project_list()
             self._append_log(f"已从 RepoPulse 移除项目：{project.name}")
             return
-        if project_id not in {item.project_id for item in self.projects}:
+        # 渠道详情：只删该渠道上的工程文件，不动工作区和其他渠道，配置保留（状态变待新建）
+        remote = project.remotes.get(card_key) or self.remotes.get(card_key)
+        if remote is None:
             return
-        self.projects = [item for item in self.projects if item.project_id != project_id]
+        label = remote.label or remote.kind
+        try:
+            if remote.kind == "local":
+                target = GitService().local_channel_path(remote, project)
+                if target.is_dir() and len(str(target)) > 5:
+                    def _on_rm_error(func, path, _exc):
+                        import stat
+                        try:
+                            os.chmod(path, stat.S_IWRITE)
+                            func(path)
+                        except Exception:
+                            pass
+                    shutil.rmtree(target, onerror=_on_rm_error)
+                    self._append_log(f"已删除本地备份仓：{target}")
+            else:
+                GitService().delete_host_repository(remote, project.name)
+                self._append_log(f"已删除 {label} 上的工程：{project.name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
         self.store.save(self.projects)
-        self.results.pop(project_id, None)
-        self._reload_project_list()
-        self._append_log(f"已从 RepoPulse 移除项目：{project.name}")
+        self._render_cards(None)
 
     def _remove_repository_card(self, key: str, dialog: RepositoryDetailDialog) -> None:
         project = self._current_project()

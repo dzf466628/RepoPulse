@@ -349,3 +349,54 @@ class MigrateWorker(QThread):
             except Exception:
                 pass
             self.failed.emit(str(exc))
+
+class CompleteRepoWorker(QThread):
+    """在已有非 git 目录里完善成 git 仓库：init + 关联远程 + fetch + checkout。"""
+
+    log_message = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    completed = pyqtSignal(str)  # 成功后返回目标目录
+    detailed_progress = pyqtSignal(str, int, int, str)
+
+    def __init__(self, clone_url: str, target_dir: str, branch: str):
+        super().__init__()
+        self.clone_url = clone_url
+        self.target_dir = target_dir
+        self.branch = branch or "main"
+
+    def run(self) -> None:
+        try:
+            tgt = str(self.target_dir)
+            service = GitService(
+                log=self.log_message.emit,
+                progress=self.detailed_progress.emit,
+            )
+            service._run(
+                ["init"],
+                cwd=tgt,
+                timeout=60,
+            )
+            service._run(
+                ["remote", "add", "origin", str(self.clone_url)],
+                cwd=tgt,
+                timeout=30,
+            )
+            service._run(
+                ["fetch", "--progress", "origin"],
+                cwd=tgt,
+                timeout=600,
+                capture_progress=True,
+                progress_task="拉取远程",
+            )
+            # 尝试 checkout 远程分支；失败就只关联，不动本地文件
+            try:
+                service._run(
+                    ["checkout", "-b", self.branch, f"origin/{self.branch}"],
+                    cwd=tgt,
+                    timeout=60,
+                )
+            except Exception:
+                self.log_message.emit("本地文件与远程有差异，已关联远程，未自动覆盖。")
+            self.completed.emit(tgt)
+        except Exception as exc:  # pragma: no cover
+            self.failed.emit(str(exc))

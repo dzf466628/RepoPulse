@@ -645,10 +645,10 @@ class RepositoryDetailDialog(QDialog):
     def _confirm_delete(self, project_id: str, project_name: str) -> None:
         if not confirm_delete_dialog(
             self,
-            "移除渠道中的项目",
-            f"从渠道移除「{project_name}」？",
-            "只移除关联，不删文件和远程",
-            confirm_text="移除",
+            "删除渠道工程",
+            f"删除该渠道上的「{project_name}」？",
+            "只删该渠道的工程文件，本地工作区和其他渠道保留",
+            confirm_text="删除工程",
         ):
             return
         self.project_delete_requested.emit(project_id)
