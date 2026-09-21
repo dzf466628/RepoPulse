@@ -122,7 +122,7 @@ class BusyDialog(QDialog):
         self.setWindowTitle("请等待")
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setModal(True)
-        self.setFixedSize(320, 160)  # 增加高度以容纳详细进度
+        self.setFixedSize(420, 178)  # 加宽以完整显示 URL 和进度
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self._message = "正在处理"
@@ -139,25 +139,25 @@ class BusyDialog(QDialog):
         self.message_label = QLabel()
         self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message_label.setWordWrap(True)
-        self.message_label.setMaximumHeight(34)
-        self.message_label.setStyleSheet("color: #D7DFEB; font-size: 11px;")
-        
+        self.message_label.setMaximumHeight(44)
+        self.message_label.setStyleSheet("color: #D7DFEB; font-size: 10px;")
+
         # 详细进度标签
         self.detail_label = QLabel()
         self.detail_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.detail_label.setWordWrap(True)
-        self.detail_label.setStyleSheet("color: #A9B5C8; font-size: 10px;")
-        self.detail_label.setMaximumHeight(20)
+        self.detail_label.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 11px; font-weight: 600;")
+        self.detail_label.setMaximumHeight(22)
         self.detail_label.hide()  # 默认隐藏
-        
+
         # 进度条（支持确定和不确定两种模式）
         self.progress = QProgressBar()
         self.progress.setRange(0, 0)  # 不确定模式
         self.progress.setTextVisible(True)
-        self.progress.setFixedHeight(10)
+        self.progress.setFixedHeight(14)
         self.progress.setStyleSheet(
-            f"QProgressBar {{ background: {PANEL_RAISED}; border: 1px solid {BORDER_COLOR}; border-radius: 3px; "
-            "text-align: center; color: #D7DFEB; font-size: 9px; }}"
+            f"QProgressBar {{ background: {PANEL_RAISED}; border: 1px solid {BORDER_COLOR}; border-radius: 4px; "
+            "text-align: center; color: #FFFFFF; font-size: 10px; font-weight: 600; }"
             f"QProgressBar::chunk {{ background: {ACCENT_COLOR}; border-radius: 3px; }}"
         )
         

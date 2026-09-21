@@ -183,8 +183,15 @@ class GitService:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         progress_re = re.compile(
-            r"(Receiving|Compressing|Resolving|Counting|Writing)\s+objects:\s+(\d+)%\s+\((\d+)/(\d+)\)"
+            r"(Receiving|Compressing|Resolving|Counting|Writing|Enumerating)\s+objects:\s+"
+            r"(\d+)%\s+\((\d+)/(\d+)\)"
+            r"(?:,\s*([0-9.,]+\s*[KMG]i?B)(?:\s*\|\s*([0-9.,]+\s*[KMG]i?B/s))?)?"
         )
+        stage_cn = {
+            "Enumerating": "枚举对象", "Counting": "计数对象",
+            "Compressing": "压缩对象", "Writing": "上传对象",
+            "Receiving": "接收对象", "Resolving": "解析对象",
+        }
 
         def pump_stdout() -> None:
             for line in process.stdout:
@@ -199,12 +206,11 @@ class GitService:
                     percentage = int(match.group(2))
                     current = int(match.group(3))
                     total = int(match.group(4))
-                    self.progress(
-                        progress_task,
-                        current,
-                        total,
-                        f"{stage} objects: {percentage}% ({current}/{total})",
-                    )
+                    speed = match.group(6) or ""
+                    detail = f"{stage_cn.get(stage, stage)} {percentage}%（{current}/{total}）"
+                    if speed:
+                        detail += f"    {speed}"
+                    self.progress(progress_task, current, total, detail)
 
         out_thread = threading.Thread(target=pump_stdout, daemon=True)
         err_thread = threading.Thread(target=pump_stderr, daemon=True)
@@ -1270,11 +1276,11 @@ class GitService:
         self._run(
             ["push", target_url, f"HEAD:refs/heads/{branch}"],
             cwd=source,
-            timeout=90,
+            timeout=600,
             extra_env=self._auth_env(remote),
+            capture_progress=True,
+            progress_task=f"推送 {label}",
         )
-        if full_sync:
-            self.log(f"{label}：已执行全量同步")
         if created:
             return {"ok": True, "message": f"{label}：已创建仓库并推送完成"}
         return {"ok": True, "message": f"{label}：同步完成"}
