@@ -600,7 +600,14 @@ class FloatingStatusWidget(QWidget):
 
         root.addWidget(self.total_ring)
         root.addLayout(text_box, 1)
-        root.addWidget(self.sync_btn)
+        # 同步按钮整体上移 3px：FLOAT_H=52、上下边距各6，按钮26 垂直居中时 y=13；
+        # 包一层垂直布局，底部留 6px 把按钮往上顶（包裹高 32 在高 40 的行内居中 top=4，
+        # 按钮无顶部间距，y=6(margin)+4=10）
+        btn_col = QVBoxLayout()
+        btn_col.setContentsMargins(0, 0, 0, 6)
+        btn_col.setSpacing(0)
+        btn_col.addWidget(self.sync_btn)
+        root.addLayout(btn_col, 0)
 
     # ------------------------------------------------------------ 渠道环
     def set_channels(self, keys: list[str]) -> None:
