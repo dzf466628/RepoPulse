@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import math
+
 from PyQt6.QtCore import (
     QByteArray,
     QEasingCurve,
     QPoint,
     QRect,
+    QRectF,
     Qt,
     QVariantAnimation,
     pyqtSignal,
@@ -103,12 +106,27 @@ class ProgressRing(QWidget):
     FILL_MS = 1000
     CHECK_MS = 360
 
-    def __init__(self, size: int, parent=None):
+    def __init__(self, size: int, parent=None, bounce_h: int = 0):
         super().__init__(parent)
         self._size = size
-        self.setFixedSize(size, size)
+        # bounce_h>size 时，控件占一条更高的轨道，状态图标在里面上下弹跳
+        self._bounce_h = bounce_h if bounce_h and bounce_h > size else 0
+        self.setFixedSize(size, self._bounce_h or size)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setStyleSheet("background: transparent;")
+        self._state_pm: QPixmap | None = None
+        # 弹跳：_bounce_frac 0=贴地(压扁) 1=到顶(正常)
+        self._bouncing = False
+        self._bounce_up = True
+        self._bounce_frac = 0.0
+        # 弹跳：一条正弦曲线一次循环完成 起->顶->落，顶点平滑掠过不拖沓
+        self._bounce_anim = QVariantAnimation(self)
+        self._bounce_anim.setDuration(1500)
+        self._bounce_anim.setStartValue(0.0)
+        self._bounce_anim.setEndValue(1.0)
+        self._bounce_anim.setLoopCount(-1)
+        self._bounce_anim.setEasingCurve(QEasingCurve.Type.Linear)
+        self._bounce_anim.valueChanged.connect(self._on_bounce_value)
 
         # mode: "state" 显示符号 / "ring" 进度环
         self._mode = "state"
@@ -163,6 +181,7 @@ class ProgressRing(QWidget):
         self._pending = None
         self._state_key = state_key
         self._state_color = color
+        self._state_pm = render_state(state_key, color, self._size)
         if animate and state_key == "clean" and self._mode == "ring":
             self._phase = "check"
             self._check = 0.0
@@ -170,6 +189,7 @@ class ProgressRing(QWidget):
         else:
             self._mode = "state"
             self._phase = "fill"
+        self._refresh_bounce()
         self.update()
 
     def start_progress(self, color: str = ACCENT_COLOR) -> None:
@@ -186,6 +206,7 @@ class ProgressRing(QWidget):
         self._spin_anim.stop()
         self._prog_anim.stop()
         self._fill_anim.start()
+        self._refresh_bounce()
         self.update()
 
     def set_progress(self, frac: float, color: str = ACCENT_COLOR) -> None:
@@ -202,6 +223,7 @@ class ProgressRing(QWidget):
         self._prog_anim.setStartValue(float(self._fill))
         self._prog_anim.setEndValue(float(frac))
         self._prog_anim.start()
+        self._refresh_bounce()
         self.update()
 
     def finish(self, state_key: str, color: str) -> None:
@@ -257,6 +279,7 @@ class ProgressRing(QWidget):
         self._mode = "state"
         self._phase = "fill"
         self._state_key = "clean"
+        self._refresh_bounce()
         self.update()
 
     def _resolve(self) -> None:
@@ -276,21 +299,56 @@ class ProgressRing(QWidget):
             self._phase = "fill"
             self._state_key = state_key
             self._state_color = color
+        self._refresh_bounce()
+        self.update()
+
+    # ------------------------------------------------------------ 弹跳
+    def _start_bounce(self) -> None:
+        if self._bounce_h <= 0 or self._bouncing:
+            return
+        self._bouncing = True
+        self._bounce_frac = 0.0
+        self._bounce_anim.start()
+
+    def _stop_bounce(self) -> None:
+        if not self._bouncing:
+            return
+        self._bouncing = False
+        self._bounce_anim.stop()
+        self._bounce_frac = 0.0
+
+    def _refresh_bounce(self) -> None:
+        if self._bounce_h <= 0:
+            return
+        want = self._mode == "state" and self._phase != "check" and self._state_key != "clean"
+        if want and not self._bouncing:
+            self._start_bounce()
+        elif not want and self._bouncing:
+            self._stop_bounce()
+
+    def _on_bounce_value(self, value) -> None:
+        self._bounce_frac = float(value)
         self.update()
 
     # ------------------------------------------------------------ 绘制
     def paintEvent(self, event):  # noqa: N802 - Qt API
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = self._size
+        top = (self.height() - w) // 2
         if self._mode == "state":
-            pm = render_state(self._state_key, self._state_color, self._size)
-            p.drawPixmap(0, 0, pm)
+            pm = self._state_pm if self._state_pm is not None else render_state(
+                self._state_key, self._state_color, w)
+            if self._bouncing:
+                self._paint_bounce(p, pm, w)
+            else:
+                p.drawPixmap(0, top, pm)
             return
 
         pen_w = 2.0 if self._size <= 14 else 2.4
         margin = pen_w
-        rect = QRect(int(margin), int(margin),
-                     self._size - int(margin * 2), self._size - int(margin * 2))
+        rect = QRect(int(margin), top + int(margin),
+                     w - int(margin * 2), w - int(margin * 2))
 
         if self._phase == "check":
             self._paint_check(p, rect, pen_w)
@@ -355,6 +413,55 @@ class ProgressRing(QWidget):
         green.setDashOffset(total * (1.0 - self._check))
         p.setPen(green)
         p.drawPath(path)
+
+    def _paint_bounce(self, p: QPainter, pm: QPixmap, w: int) -> None:
+        """非对号稳态：图标在轨道内上下弹跳，空中翻转一圈，落地压扁 + 浅阴影。"""
+        H = self.height()
+        margin = 5
+        u = self._bounce_frac                       # 相位 0->1：起->顶->落
+        h = max(0.0, math.sin(math.pi * u))          # 0 贴地 / 1 到顶
+        top_y = margin
+        bottom_y = H - margin - w
+        y = bottom_y - (bottom_y - top_y) * h
+        # 仅在贴地附近压扁
+        squash = max(0.0, 1.0 - h / 0.4)
+        sx = 1.0 + 0.22 * squash
+        sy = 1.0 - 0.30 * squash
+        # 70% 高度开始翻转：相位跨顶点线性转一圈，到顶 180、落回 70% 正好 360
+        u0 = math.asin(0.7) / math.pi
+        u1 = 1.0 - u0
+        if u < u0:
+            t_rot = 0.0
+        elif u > u1:
+            t_rot = 1.0
+        else:
+            t_rot = (u - u0) / (u1 - u0)
+        rot = 360.0 * t_rot
+
+        # 地面浅阴影：贴地大而略实，到顶小而淡
+        ground_y = H - margin
+        sh_w = w * (0.92 - 0.42 * h)
+        sh_h = 3.0
+        sh_alpha = int(72 * (1.0 - 0.55 * h))
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(0, 0, 0, max(0, sh_alpha)))
+        p.drawEllipse(QRectF((w - sh_w) / 2.0, ground_y - sh_h / 2.0 + 1.5, sh_w, sh_h))
+        p.restore()
+
+        # 先绕图标中心翻转，再以底边为支点压扁（落地时底边贴地、角度回正）
+        p.save()
+        cx = w / 2.0
+        cy = float(y) + w / 2.0
+        base = float(y + w)
+        p.translate(cx, cy)
+        p.rotate(rot)
+        p.translate(-cx, -cy)
+        p.translate(cx, base)
+        p.scale(sx, sy)
+        p.translate(-cx, -base)
+        p.drawPixmap(0, int(y), pm)
+        p.restore()
 
 
 class DockSlot(QFrame):
@@ -461,7 +568,7 @@ class FloatingStatusWidget(QWidget):
         root.setSpacing(6)
 
         # 左侧：项目总状态环
-        self.total_ring = ProgressRing(16)
+        self.total_ring = ProgressRing(16, bounce_h=FLOAT_H - 10)
         self.total_ring.set_state("waiting", "#8A97AA")
 
         # 中间竖排：项目名（运行时追加任务状态）+ 渠道状态环（按配置动态）

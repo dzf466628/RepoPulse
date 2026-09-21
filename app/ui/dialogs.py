@@ -4,8 +4,12 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
-from PyQt6.QtCore import QSettings, Qt, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices, QIcon
+from PyQt6.QtCore import (
+    QEasingCurve, QRectF, QSettings, QSize, Qt, QTimer, QUrl, QVariantAnimation, pyqtSignal,
+)
+from PyQt6.QtGui import (
+    QColor, QDesktopServices, QIcon, QPainter, QPainterPath, QPen,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -76,6 +80,156 @@ def confirm_delete_dialog(
     return box.clickedButton() is yes
 from app.models import ProjectConfig, RemoteConfig
 from app.ui.theme import ACCENT_COLOR, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
+
+
+# ------------------------------------------------------------ Jelly 复选框
+# 果冻回弹关键帧（时间, 横向缩放, 纵向缩放），照搬 cssbuttons-io jelly 曲线
+_JELLY_KEYFRAMES = (
+    (0.00, 1.00, 1.00),
+    (0.30, 1.25, 0.75),
+    (0.40, 0.75, 1.25),
+    (0.50, 1.15, 0.85),
+    (0.65, 0.95, 1.05),
+    (0.75, 1.05, 0.95),
+    (1.00, 1.00, 1.00),
+)
+
+
+def _jelly_scale(t: float) -> tuple[float, float]:
+    t = max(0.0, min(1.0, t))
+    for i in range(len(_JELLY_KEYFRAMES) - 1):
+        t0, sx0, sy0 = _JELLY_KEYFRAMES[i]
+        t1, sx1, sy1 = _JELLY_KEYFRAMES[i + 1]
+        if t0 <= t <= t1:
+            k = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            return sx0 + (sx1 - sx0) * k, sy0 + (sy1 - sy0) * k
+    return 1.0, 1.0
+
+
+class JellyCheckBox(QCheckBox):
+    """勾选瞬间方框果冻回弹，对号延迟 150ms 描边生长；取消时对号快速收回。"""
+
+    BOX = 18
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._jelly_t = 1.0
+        self._check_t = 0.0
+        self._hover = False
+        self._jelly_anim = QVariantAnimation(self)
+        self._jelly_anim.setDuration(600)
+        self._jelly_anim.setStartValue(0.0)
+        self._jelly_anim.setEndValue(1.0)
+        self._jelly_anim.valueChanged.connect(self._on_jelly)
+        self._check_anim = QVariantAnimation(self)
+        self._check_anim.setDuration(300)
+        self._check_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._check_anim.valueChanged.connect(self._on_check)
+        self.clicked.connect(self._on_clicked)
+        self.setMouseTracking(True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        fm = self.fontMetrics()
+        w = self.BOX + 8 + fm.horizontalAdvance(self.text())
+        h = max(self.BOX, fm.height()) + 4
+        return QSize(w, h)
+
+    def setChecked(self, checked: bool) -> None:  # noqa: N802
+        super().setChecked(checked)
+        self._jelly_t = 1.0
+        self._check_t = 1.0 if checked else 0.0
+        self.update()
+
+    def _on_clicked(self, checked: bool) -> None:
+        if checked:
+            self._jelly_t = 0.0
+            self._jelly_anim.stop()
+            self._jelly_anim.start()
+            self._check_anim.stop()
+            QTimer.singleShot(150, self._grow_check)
+        else:
+            self._check_anim.stop()
+            self._check_anim.setStartValue(float(self._check_t))
+            self._check_anim.setEndValue(0.0)
+            self._check_anim.start()
+
+    def _grow_check(self) -> None:
+        if not self.isChecked():
+            return
+        self._check_anim.setStartValue(0.0)
+        self._check_anim.setEndValue(1.0)
+        self._check_anim.start()
+
+    def _on_jelly(self, value) -> None:
+        self._jelly_t = float(value)
+        self.update()
+
+    def _on_check(self, value) -> None:
+        self._check_t = float(value)
+        self.update()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        s = self.BOX
+        top = (self.height() - s) // 2
+        x = 2
+        checked = self.isChecked()
+        sx, sy = _jelly_scale(self._jelly_t) if checked else (1.0, 1.0)
+        cx = x + s / 2.0
+        cy = top + s / 2.0
+
+        p.save()
+        p.translate(cx, cy)
+        p.scale(sx, sy)
+        p.translate(-cx, -cy)
+        rect = QRectF(x, top, s, s)
+        if checked:
+            fill = QColor(ACCENT_COLOR)
+            border = QColor(ACCENT_COLOR)
+        else:
+            fill = QColor("#0A2231")
+            border = QColor(ACCENT_COLOR) if self._hover else QColor(BORDER_COLOR)
+        p.setPen(QPen(border, 1.2))
+        p.setBrush(fill)
+        p.drawRoundedRect(rect, 5, 5)
+
+        if self._check_t > 0:
+            k = s / 24.0
+            path = QPainterPath()
+            path.moveTo(x + 20 * k, top + 6 * k)
+            path.lineTo(x + 9 * k, top + 17 * k)
+            path.lineTo(x + 4 * k, top + 12 * k)
+            total = path.length()
+            pen = QPen(QColor("#04222B"))
+            pen.setWidthF(2.6 * k)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            pen.setDashPattern([total, total + 1.0])
+            pen.setDashOffset(total * (1.0 - self._check_t))
+            p.setPen(pen)
+            p.drawPath(path)
+        p.restore()
+
+        p.setPen(QColor("#E8ECF2"))
+        text_rect = QRectF(x + s + 8, 0, max(0, self.width() - x - s - 8), self.height())
+        p.drawText(
+            text_rect,
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
+            self.text(),
+        )
+        p.end()
 
 
 # 关于页展示的第三方开源组件：(名称, 许可证, 作者/机构)
@@ -890,14 +1044,14 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
 
         settings = QSettings("RepoPulse", "RepoPulse")
-        self.full_sync_check = QCheckBox("本地 Git 全量同步（连素材大文件一起存）")
+        self.full_sync_check = JellyCheckBox("本地 Git 全量同步（连素材大文件一起存）")
         self.full_sync_check.setChecked(settings.value("sync_full_files", False, type=bool))
         self.full_sync_check.setToolTip("开启后，本地全量仓库会镜像整个工作区，代码和素材大文件一起存储；其他 Git 远程仍只推代码")
-        self.ignore_github_check = QCheckBox("GitHub 连接失败自动忽略")
+        self.ignore_github_check = JellyCheckBox("GitHub 连接失败自动忽略")
         self.ignore_github_check.setChecked(settings.value("ignore_github_failure", False, type=bool))
         self.ignore_github_check.setToolTip("GitHub 不可用时显示“未代理”，不影响其他渠道状态")
 
-        self.scheduled_check = QCheckBox("开启定时同步")
+        self.scheduled_check = JellyCheckBox("开启定时同步")
         self.scheduled_check.setChecked(settings.value("scheduled_sync_enabled", False, type=bool))
         self.scheduled_hours = QSpinBox()
         self.scheduled_hours.setRange(0, 23)
@@ -924,7 +1078,7 @@ class SettingsDialog(QDialog):
         interval.addWidget(QLabel("秒"))
         interval.addStretch(1)
 
-        self.leading_check = QCheckBox("开启修改同步")
+        self.leading_check = JellyCheckBox("开启修改同步")
         self.leading_check.setChecked(settings.value("leading_sync_enabled", False, type=bool))
         self.leading_threshold = QSpinBox()
         self.leading_threshold.setRange(1, 9999)
@@ -995,7 +1149,7 @@ class SettingsDialog(QDialog):
         except Exception:
             prompt, close_to_tray = True, True
 
-        self.close_prompt_check = QCheckBox("关闭软件时提示选择")
+        self.close_prompt_check = JellyCheckBox("关闭软件时提示选择")
         self.close_prompt_check.setChecked(prompt)
         self.close_prompt_check.setToolTip("关闭窗口时选择最小化到托盘或退出软件")
         self.close_action_combo = QComboBox()
@@ -1171,7 +1325,7 @@ class ProjectDialog(QDialog):
             self.workspace_edit.setText(project.workspace_path)
 
     def _build_ui(self) -> None:
-        self.existing_check = QCheckBox("现有项目")
+        self.existing_check = JellyCheckBox("现有项目")
         self.existing_check.setToolTip("直接读取已有项目目录，不创建新文件夹")
         self.existing_check.stateChanged.connect(self._sync_existing_mode)
         self.name_edit = QLineEdit()

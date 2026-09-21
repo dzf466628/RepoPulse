@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 import shutil
@@ -26,7 +26,6 @@ from PyQt6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QApplication,
-    QCheckBox,
     QDialog,
     QLabel,
     QListWidget,
@@ -54,7 +53,9 @@ from app.core.git_service import GitService
 from app.core.updater import UPDATE_URL, UpdateCheckThread
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
-from app.ui.dialogs import GitDialog, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog, confirm_delete_dialog
+from app.ui.dialogs import (
+    GitDialog, JellyCheckBox, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog, confirm_delete_dialog,
+)
 from app.ui.update_dialog import UpdateDownloadDialog
 from app.ui.floating_widget import DockSlot, FloatingStatusWidget, ProgressRing
 from PyQt6.QtSvg import QSvgRenderer
@@ -1065,7 +1066,7 @@ class MainWindow(QMainWindow):
             close_button = confirm.addButton("关闭软件", QMessageBox.ButtonRole.DestructiveRole)
             confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
             tray_button.setEnabled(can_tray)
-            remember = QCheckBox("下次不再提醒")
+            remember = JellyCheckBox("下次不再提醒")
             confirm.setCheckBox(remember)
             confirm.exec()
             clicked = confirm.clickedButton()
@@ -3068,7 +3069,6 @@ class MainWindow(QMainWindow):
                     "/SILENT",
                     "/SUPPRESSMSGBOXES",
                     "/NORESTART",
-                    "/CLOSEAPPLICATIONS",
                 ],
                 **kwargs,
             )

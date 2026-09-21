@@ -1,7 +1,8 @@
 $ErrorActionPreference = "Stop"
 
 # RepoPulse 一键打包：PyInstaller onedir -> Inno Setup 安装包
-# 版本号唯一来源 app/__init__.py 的 __version__；安装包输出到 dist\RepoPulse-Setup-v<ver>.exe
+# 版本号唯一来源 app/__init__.py 的 __version__；每次打包自动把 patch 位 +1，
+# 安装包输出到 dist\RepoPulse-Setup-v<ver>.exe
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectRoot
 
@@ -16,6 +17,16 @@ if (-not (Test-Path $python)) {
 
 $version = (& $python -c "from app import __version__; print(__version__)").Trim()
 if (-not $version) { throw "Failed to read __version__ from app/__init__.py" }
+# 自动把 patch 位 +1（如 1.0.1 -> 1.0.2），写回 app/__init__.py（UTF8 无 BOM）
+$initPath = Join-Path $projectRoot "app\__init__.py"
+$initText = [System.IO.File]::ReadAllText($initPath)
+$vm = [regex]::Match($initText, '__version__\s*=\s*"(\d+)\.(\d+)\.(\d+)"')
+if (-not $vm.Success) { throw "Could not parse __version__ in app/__init__.py" }
+$newVersion = "{0}.{1}.{2}" -f $vm.Groups[1].Value, $vm.Groups[2].Value, ([int]$vm.Groups[3].Value + 1)
+$initText = [regex]::Replace($initText, '__version__\s*=\s*"[^"]+"', "__version__ = `"$newVersion`"")
+[System.IO.File]::WriteAllText($initPath, $initText, (New-Object System.Text.UTF8Encoding($false)))
+$version = $newVersion
+Write-Host "[auto] build version bumped -> $version"
 $distApp = Join-Path $projectRoot "dist\RepoPulse"
 $distRoot = Join-Path $projectRoot "dist"
 $installerPath = Join-Path $distRoot ("RepoPulse-Setup-v" + $version + ".exe")
@@ -33,8 +44,14 @@ if (-not $iscc) {
 }
 
 Write-Host "[1/3] Build PyInstaller onedir directory (v$version) ..."
-& $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath (Join-Path $projectRoot "build") RepoPulse.spec
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
+# PyInstaller/ISCC 把进度日志写到 stderr；合并到 stdout 并临时放宽策略，
+# 避免 $ErrorActionPreference="Stop" 把日志误判成 NativeCommandError（假失败）。
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& $python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath (Join-Path $projectRoot "build") RepoPulse.spec 2>&1 | ForEach-Object { "$_" } | Out-Host
+$pyiCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEAP
+if ($pyiCode -ne 0) { throw "PyInstaller build failed." }
 if (-not (Test-Path (Join-Path $distApp "RepoPulse.exe"))) {
     throw "PyInstaller did not create dist\RepoPulse\RepoPulse.exe"
 }
@@ -43,8 +60,11 @@ Write-Host "[2/3] Compile Inno Setup installer ..."
 if (Test-Path $installerPath) {
     Remove-Item -LiteralPath $installerPath -Force
 }
-& $iscc "/DAppVersion=$version" (Join-Path $projectRoot "installer.iss")
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path $installerPath)) {
+$ErrorActionPreference = "Continue"
+& $iscc "/DAppVersion=$version" (Join-Path $projectRoot "installer.iss") 2>&1 | ForEach-Object { "$_" } | Out-Host
+$isccCode = $LASTEXITCODE
+$ErrorActionPreference = $prevEAP
+if ($isccCode -ne 0 -or -not (Test-Path $installerPath)) {
     throw "Inno Setup compilation failed or did not create $installerPath"
 }
 

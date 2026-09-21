@@ -1,5 +1,7 @@
 #define AppName "RepoPulse"
-#define AppVersion "0.2.3"
+#ifndef AppVersion
+#define AppVersion "1.0.2"
+#endif
 #define AppPublisher "RepoPulse"
 #define AppExeName "RepoPulse.exe"
 
@@ -21,9 +23,10 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
-; 自动更新静默升级：安装时自动关闭正在运行的旧版本，安装完成后由 [Run] 拉起新版本
-CloseApplications=yes
-RestartApplications=yes
+; 自动更新静默升级：安装时强制关闭正在运行的旧版本（托盘程序拦截了普通关闭，
+; 必须用 force 强杀，否则 /SUPPRESSMSGBOXES 下直接 Abort 回滚），完成后由 [Run] 拉起新版本
+CloseApplications=force
+RestartApplications=no
 VersionInfoVersion={#AppVersion}.0
 VersionInfoProductVersion={#AppVersion}
 VersionInfoDescription=RepoPulse Git 状态管理工具安装程序
