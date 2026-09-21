@@ -3060,18 +3060,10 @@ class MainWindow(QMainWindow):
         import subprocess
         import sys
         try:
-            kwargs = {}
             if sys.platform == "win32":
-                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            subprocess.Popen(
-                [
-                    installer_path,
-                    "/SILENT",
-                    "/SUPPRESSMSGBOXES",
-                    "/NORESTART",
-                ],
-                **kwargs,
-            )
+                self._launch_installer_windows(installer_path)
+            else:
+                subprocess.Popen([installer_path])
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(
                 self, "更新",
@@ -3079,8 +3071,47 @@ class MainWindow(QMainWindow):
                 f"{exc}\n\n请手动运行：\n{installer_path}",
             )
             return
-        # 交给安装程序关闭并替换本程序，随后由安装包 [Run] 重新拉起新版本
+        # 引导脚本会强杀本程序、等安全软件释放文件锁后再静默安装；这里正常退出
         self._exit_from_tray()
+
+    def _launch_installer_windows(self, installer_path: str) -> None:
+        """写一个独立于本程序的引导 bat 并启动，再退出本程序。
+
+        必须由外部 bat 完成"杀进程 -> 等文件锁释放 -> 安装"：
+        1) 本程序是托盘应用，安装器 RestartManager 的温和关闭会被忽略；
+        2) 安全软件（如电脑管家）在进程刚结束的瞬间仍短暂占用 exe，安装器
+           立刻替换会 DeleteFile 失败（错误 5 拒绝访问），需先等待几秒；
+        3) bat 与本程序无父子依赖，本程序退出/被杀后它仍会跑完安装。
+        注意：不能用 tasklist 是否还有同名进程来判断结束——安全软件会留下
+        无法结束、也不锁文件的僵尸进程对象，会让等待逻辑死循环。
+        """
+        import os
+        import subprocess
+        import tempfile
+
+        update_dir = os.path.join(tempfile.gettempdir(), "RepoPulseUpdate")
+        os.makedirs(update_dir, exist_ok=True)
+        bat_path = os.path.join(update_dir, "apply_update.bat")
+        setup = os.path.normpath(installer_path)
+        lines = [
+            "@echo off",
+            'set "SETUP=' + setup + '"',
+            "taskkill /F /IM RepoPulse.exe >nul 2>&1",
+            "ping 127.0.0.1 -n 5 >nul",
+            "taskkill /F /IM RepoPulse.exe >nul 2>&1",
+            "ping 127.0.0.1 -n 4 >nul",
+            'start /wait "" "%SETUP%" /SILENT /SUPPRESSMSGBOXES /NORESTART',
+            "exit /b %errorlevel%",
+        ]
+        with open(bat_path, "w", encoding="mbcs", newline="\r\n") as fh:
+            fh.write("\r\n".join(lines) + "\r\n")
+        create_no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        subprocess.Popen(
+            ["cmd.exe", "/c", bat_path],
+            creationflags=create_no_window | new_group,
+            close_fds=True,
+        )
 
     def open_settings(self) -> None:
         dialog = SettingsDialog(self)
