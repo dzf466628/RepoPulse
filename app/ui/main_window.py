@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 import shutil
@@ -56,7 +56,7 @@ from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
 from app.ui.dialogs import GitDialog, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog, confirm_delete_dialog
 from app.ui.update_dialog import UpdateDownloadDialog
-from app.ui.floating_widget import DockSlot, FloatingStatusWidget
+from app.ui.floating_widget import DockSlot, FloatingStatusWidget, ProgressRing
 from PyQt6.QtSvg import QSvgRenderer
 from app.ui.theme import (
     ACCENT_COLOR,
@@ -374,13 +374,12 @@ class StatusCard(QFrame):
         badge_layout.setContentsMargins(6, 2, 8, 2)
         badge_layout.setSpacing(4)
         state_key = state_key_from_color(status_color)
-        icon_label = QLabel()
-        icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        icon_label.setPixmap(render_state_pixmap(state_key, status_color, 12))
+        self.status_ring = ProgressRing(14)
+        self.status_ring.set_state(state_key, status_color)
         text_label = QLabel(status)
         text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         text_label.setStyleSheet(f"color: {status_color}; font-size: 11px; font-weight: 700; background: transparent;")
-        badge_layout.addWidget(icon_label)
+        badge_layout.addWidget(self.status_ring)
         badge_layout.addWidget(text_label)
         title_label.setMinimumWidth(60)
         title_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -439,6 +438,15 @@ class StatusCard(QFrame):
             self.card_body = detail_body
 
         self.set_selected(False)
+
+    def card_sync_started(self) -> None:
+        """同步开始：环假填充后旋转等待。"""
+        self.status_ring.start_progress()
+
+    def card_sync_success(self) -> None:
+        """同步成功：环填满后播对号生长。"""
+        self.status_ring.set_progress(1.0)
+        self.status_ring.finish("clean", STATE_COLORS["clean"])
 
     def set_selected(self, selected: bool) -> None:
         self._selected = selected
@@ -1766,6 +1774,8 @@ class MainWindow(QMainWindow):
             else:
                 card = self._build_remote_card(key, remote, remote_result)
             self._add_card(key, card, index)
+            self._arm_card_sync(card, key)
+        self._just_synced_ok = False
         self._update_pull_button_state()
         self._update_floating_widget()
 
@@ -1824,6 +1834,16 @@ class MainWindow(QMainWindow):
                                  f"{remote.label or key}：{tip}")
         busy = self.worker is not None and self.worker.isRunning()
         fw.set_sync_enabled(bool(project.sync_enabled) and not busy)
+
+    def _arm_card_sync(self, card, key: str) -> None:
+        """同步中重建卡片：在转的继续转；刚成功的播一次对号。"""
+        if key == "__staging__":
+            return
+        sync_running = self.sync_worker is not None and self.sync_worker.isRunning()
+        if sync_running:
+            card.card_sync_started()
+        elif getattr(self, "_just_synced_ok", False):
+            card.card_sync_success()
 
     def _add_card(self, key: str, card: StatusCard, index: int) -> None:
         card.clicked.connect(self._select_card)
@@ -2745,6 +2765,9 @@ class MainWindow(QMainWindow):
         fw = getattr(self, "floating", None)
         if fw is not None:
             fw.channel_started(key)
+        card = self.card_widgets.get(key)
+        if card is not None:
+            card.card_sync_started()
         if self.busy_dialog and _qobj_alive(self.busy_dialog):
             self.busy_dialog.set_message(f"正在同步 {key}...")
 
@@ -2800,6 +2823,7 @@ class MainWindow(QMainWindow):
         self._hide_busy_dialog()
         self._set_progress_style("error" if overall_error else "success")
         self._append_log("同步完成。" if not overall_error else "同步结束，部分渠道失败。")
+        self._just_synced_ok = not overall_error
         fw = getattr(self, "floating", None)
         if fw is not None and not has_more:
             if overall_error:
@@ -3322,3 +3346,5 @@ class MainWindow(QMainWindow):
         project = self._current_project()
         if project and Path(project.workspace_path).exists():
             os.startfile("cmd.exe", "open", f'/K cd /d "{project.workspace_path}"')
+
+
