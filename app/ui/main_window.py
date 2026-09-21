@@ -2331,7 +2331,7 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 QMessageBox.warning(self, "迁移失败", str(exc))
                 return
-            self._finish_migration(dialog, project, str(new_path))
+            self._finish_migration(dialog, project, str(src), str(new_path))
             return
 
         # 跨盘：后台逐文件复制 + 真实字节进度条
@@ -2352,21 +2352,59 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "迁移失败", m),
             )
         )
+        old_src = str(src)
         self._migrate_worker.completed.connect(
             lambda new: (
                 self._hide_busy_dialog(),
-                self._finish_migration(dialog, project, new),
+                self._finish_migration(dialog, project, old_src, new),
             )
         )
         self._migrate_worker.start()
 
-    def _finish_migration(self, dialog, project, new_path: str) -> None:
+    def _finish_migration(self, dialog, project, old_path: str, new_path: str) -> None:
         project.workspace_path = new_path
+        # 项目工作区 .git/config 里指向旧路径的 remote URL 跟着改
+        self._rewrite_local_remotes(Path(new_path), old_path, new_path)
+        # local 备份仓 .git/config 里指向旧项目路径的 origin 也跟着改
+        for remote in project.remotes.values():
+            if remote.kind == "local" and remote.path:
+                base = Path(remote.path).expanduser()
+                if base.name.casefold() == project.name.casefold() and (base / ".git").is_dir():
+                    base = base.parent
+                backup = base / project.name
+                if backup.is_dir():
+                    self._rewrite_local_remotes(backup, old_path, new_path)
         self.store.save(self.projects)
         dialog.accept()
         self._reload_project_list(select_id=project.project_id)
         self._render_cards(None)
         self._append_log(f"已迁移项目到：{new_path}")
+
+    def _rewrite_local_remotes(self, repo_dir: Path, old_path: str, new_path: str) -> None:
+        """把 repo_dir/.git/config 里指向旧项目路径的 remote URL 改成新路径。"""
+        cfg = repo_dir / ".git" / "config"
+        if not cfg.is_file():
+            return
+        try:
+            text = cfg.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        old_fwd = old_path.replace("\\", "/")
+        new_fwd = new_path.replace("\\", "/")
+        replacements = [
+            (old_path, new_path),
+            (old_fwd, new_fwd),
+            (f"file:///{old_fwd.lstrip('/')}", f"file:///{new_fwd.lstrip('/')}"),
+        ]
+        new_text = text
+        for o, n in replacements:
+            new_text = new_text.replace(o, n)
+        if new_text != text:
+            try:
+                cfg.write_text(new_text, encoding="utf-8")
+                self._append_log(f"已更新 {repo_dir.name} 的本地 remote 路径")
+            except OSError:
+                pass
 
     def _rename_project(self, dialog, project) -> None:
         name, ok = QInputDialog.getText(self, "重命名项目", "新项目名称：", text=project.name)
@@ -2428,7 +2466,7 @@ class MainWindow(QMainWindow):
             self,
             "删除仓库卡片",
             f"删除「{remote.label or remote.kind}」仓库卡片？",
-            "只删除 RepoPulse 中的配置，不会删除本地文件或远程仓库。",
+            "只删配置，不删文件和远程",
             confirm_text="删除卡片",
         ):
             return

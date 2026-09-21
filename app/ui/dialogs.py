@@ -38,23 +38,25 @@ from app.core.git_service import GitCommandError, GitService
 def confirm_delete_dialog(
     parent, title: str, summary: str, detail: str, confirm_text: str = "确认删除"
 ) -> bool:
-    """统一的删除确认弹窗：红色粗体警告、固定宽度、默认聚焦取消。
-
-    所有删除操作共用，避免大小/风格不一致。返回用户是否点了确认删除。
-    """
+    """统一的删除确认弹窗：红色粗体警告、紧凑、确认按钮红色、默认聚焦取消。"""
     box = QMessageBox(parent)
     box.setWindowTitle(title)
     box.setIcon(QMessageBox.Icon.Warning)
     box.setText(summary)
     box.setInformativeText(detail)
     box.setStyleSheet(
-        "QLabel { color: #FF6B6B; font-size: 13px; font-weight: 700; min-width: 340px; }"
-        "QPushButton { min-width: 90px; padding: 6px 14px; }"
+        "QLabel { color: #FF6B6B; font-size: 12px; font-weight: 700; }"
+        "QPushButton { min-width: 72px; padding: 4px 12px; }"
     )
     yes = box.addButton(confirm_text, QMessageBox.ButtonRole.DestructiveRole)
     cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    yes.setStyleSheet(
+        "QPushButton { background: #E53935; color: white; border: none; border-radius: 4px; padding: 4px 12px; }"
+        "QPushButton:hover { background: #FF5252; }"
+    )
     box.setDefaultButton(cancel)
     box.setEscapeButton(cancel)
+    box.setFixedWidth(300)
     box.exec()
     return box.clickedButton() is yes
 from app.models import ProjectConfig, RemoteConfig
@@ -224,7 +226,7 @@ class ProjectDetailDialog(QDialog):
             self,
             "!! 删除项目",
             "确定删除这个项目吗？",
-            "将删除本地开发目录、Local Git 备份目录，以及 NAS/GitHub 上的远程仓库。\n此操作不可恢复。",
+            "删本地目录 + Local 备份 + NAS/GitHub 远程，不可恢复",
         ):
             return
         self.delete_requested.emit()
@@ -420,7 +422,7 @@ class RepositoryDetailDialog(QDialog):
             self,
             "!! 删除项目工作区",
             "确定要删除这个项目吗？",
-            "将删除本地工作区文件夹。\n本地 git 备份仓与 NAS/GitHub 远程仓库保留，之后可从 git 恢复。",
+            "删本地工作区文件夹，git 备份和远程保留",
         ):
             return
         self.delete_project_requested.emit()
@@ -575,7 +577,7 @@ class RepositoryDetailDialog(QDialog):
             self,
             "!! 永久删除远程仓库",
             f"永久删除远程仓库「{name}」？",
-            "将删除全部代码和提交历史，无法恢复。\n本地文件保留。",
+            "删全部代码和历史，本地文件保留",
             confirm_text="永久删除",
         ):
             return
@@ -616,7 +618,7 @@ class RepositoryDetailDialog(QDialog):
             self,
             "移除渠道中的项目",
             f"从渠道移除「{project_name}」？",
-            "只移除 RepoPulse 中的关联，不会删除本地文件或远程仓库。",
+            "只移除关联，不删文件和远程",
             confirm_text="移除",
         ):
             return
@@ -803,7 +805,7 @@ class SettingsDialog(QDialog):
             self,
             "删除 Git 渠道",
             f"删除渠道「{remote.label or kind}」？",
-            "仅移除 RepoPulse 中的渠道配置，不会删除远程仓库或本地文件。",
+            "只移除渠道配置，不删远程和本地文件",
             confirm_text="删除渠道",
         ):
             return
