@@ -489,14 +489,17 @@ class RepositoryDetailDialog(QDialog):
         self.projects_scroll.setWidget(container)
 
     def apply_remote_repos(self, repos: list, local_projects: list) -> None:
-        """按"本地已拉取 / 未拉取"分组展示远程真实仓库。"""
+        """按"本地已拉取 / 远程未拉取 / 本地有远程已删"分组展示远程真实仓库。"""
         local_by_name = {str(p.get("name", "")).casefold(): p for p in local_projects}
         pulled_rows: list = []
         missing_rows: list = []
+        local_only_rows: list = []
+        seen: set = set()
         for repo in repos:
             name = str(repo.get("name") or "")
             if not name:
                 continue
+            seen.add(name.casefold())
             local = local_by_name.get(name.casefold())
             row = {
                 "name": name,
@@ -507,6 +510,17 @@ class RepositoryDetailDialog(QDialog):
                 "pulled": local is not None,
             }
             (pulled_rows if local is not None else missing_rows).append(row)
+        for lname, lp in local_by_name.items():
+            if lname not in seen:
+                local_only_rows.append({
+                    "name": lp.get("name", ""),
+                    "clone_url": "",
+                    "default_branch": "",
+                    "project_id": str(lp.get("project_id", "")),
+                    "workspace_path": str(lp.get("workspace_path", "")),
+                    "pulled": True,
+                    "local_only": True,
+                })
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -517,6 +531,12 @@ class RepositoryDetailDialog(QDialog):
             head.setStyleSheet("color: #6FD08C; font-weight: 600; padding-top: 4px;")
             layout.addWidget(head)
             for row in pulled_rows:
+                self._add_remote_repo_row(layout, row)
+        if local_only_rows:
+            head = QLabel(f"本地有、远程已删（{len(local_only_rows)}）")
+            head.setStyleSheet("color: #8A97AA; font-weight: 600; padding-top: 6px;")
+            layout.addWidget(head)
+            for row in local_only_rows:
                 self._add_remote_repo_row(layout, row)
         if missing_rows:
             head = QLabel(f"远程有、本地未拉取（{len(missing_rows)}）")
@@ -542,12 +562,21 @@ class RepositoryDetailDialog(QDialog):
         row_layout.setSpacing(SPACE_1)
 
         name_label = QLabel(str(row.get("name")))
-        name_label.setStyleSheet("color: #E8ECF2; font-weight: 600;")
-        name_label.setToolTip(str(row.get("clone_url") or ""))
+        name_label.setStyleSheet("color: #8A97AA;" if row.get("local_only") else "color: #E8ECF2;")
+        name_label.setStyleSheet(name_label.styleSheet() + " font-weight: 600;")
+        name_label.setToolTip(str(row.get("clone_url") or row.get("workspace_path") or ""))
         row_layout.addWidget(name_label, 1)
 
         btn_compact = "QPushButton { padding: 1px 8px; min-height: 0; }"
         target = str(row.get("clone_url") or row.get("workspace_path") or "")
+        if row.get("local_only"):
+            view_btn = QPushButton("查看")
+            view_btn.setStyleSheet(btn_compact)
+            view_btn.setEnabled(bool(target))
+            view_btn.clicked.connect(lambda checked, t=target: self.open_target_requested.emit(t))
+            row_layout.addWidget(view_btn)
+            layout.addWidget(frame)
+            return
         if not row.get("pulled"):
             pull_btn = QPushButton("拉取")
             pull_btn.setStyleSheet(btn_compact + "QPushButton { color: #E8B87A; font-weight: 600; }")
@@ -577,7 +606,7 @@ class RepositoryDetailDialog(QDialog):
             self,
             "!! 永久删除远程仓库",
             f"永久删除远程仓库「{name}」？",
-            "删全部代码和历史，本地文件保留",
+            "只删本渠道（远程）仓库，本地文件和其他渠道不受影响",
             confirm_text="永久删除",
         ):
             return

@@ -2208,7 +2208,8 @@ class MainWindow(QMainWindow):
         if not str(root) or not name:
             QMessageBox.warning(self, "拉取", "请填写项目名称和所在目录。")
             return
-        target = root / name
+        # 选的文件夹名和项目名一致，直接用它作为根目录，不再新建一层
+        target = root if root.name.casefold() == name.casefold() else root / name
         if target.exists():
             QMessageBox.warning(self, "拉取", f"目录已存在：\n{target}\n\n已有项目请直接用'拉取'更新，不要重复拉取。")
             return
@@ -2679,6 +2680,8 @@ class MainWindow(QMainWindow):
         fw = getattr(self, "floating", None)
         if fw is not None:
             fw.channel_started(key)
+        if self.busy_dialog and _qobj_alive(self.busy_dialog):
+            self.busy_dialog.set_message(f"正在同步 {key}...")
 
     def _on_sync_channel_finished(self, key: str, ok: bool) -> None:
         self._sync_channels_done = getattr(self, "_sync_channels_done", 0) + 1
