@@ -183,7 +183,7 @@ class GitService:
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
         progress_re = re.compile(
-            r"(Receiving|Compressing|Resolving|Counting)\s+objects:\s+(\d+)%\s+\((\d+)/(\d+)\)"
+            r"(Receiving|Compressing|Resolving|Counting|Writing)\s+objects:\s+(\d+)%\s+\((\d+)/(\d+)\)"
         )
 
         def pump_stdout() -> None:

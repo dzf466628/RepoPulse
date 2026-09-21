@@ -167,6 +167,7 @@ class PullWorker(QThread):
     failed = pyqtSignal(str)
     completed = pyqtSignal()
     progress_changed = pyqtSignal(int, int)
+    detailed_progress = pyqtSignal(str, int, int, str)
 
     def __init__(self, project: ProjectConfig):
         super().__init__()
@@ -174,7 +175,7 @@ class PullWorker(QThread):
 
     def run(self) -> None:
         try:
-            service = GitService(log=self.log_message.emit)
+            service = GitService(log=self.log_message.emit, progress=self.detailed_progress.emit)
             total = len([r for r in self.project.remotes.values() if r.kind != "local" and r.enabled])
             self.progress_changed.emit(0, total)
 
@@ -265,6 +266,7 @@ class CloneRepoWorker(QThread):
     log_message = pyqtSignal(str)
     failed = pyqtSignal(str)
     completed = pyqtSignal(str)  # 成功后返回目标目录
+    detailed_progress = pyqtSignal(str, int, int, str)
 
     def __init__(self, clone_url: str, target_dir: str):
         super().__init__()
@@ -273,7 +275,7 @@ class CloneRepoWorker(QThread):
 
     def run(self) -> None:
         try:
-            service = GitService(log=self.log_message.emit)
+            service = GitService(log=self.log_message.emit, progress=self.detailed_progress.emit)
             service._run(
                 ["clone", "--progress", str(self.clone_url), str(self.target_dir)],
                 timeout=600,
@@ -284,3 +286,66 @@ class CloneRepoWorker(QThread):
         except Exception as exc:  # pragma: no cover
             self.failed.emit(str(exc))
 
+
+class MigrateWorker(QThread):
+    """跨盘迁移项目：逐文件复制 + 容错删源，实时报字节进度。"""
+
+    log_message = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)  # current_bytes, total_bytes, detail
+    failed = pyqtSignal(str)
+    completed = pyqtSignal(str)  # new_path
+
+    def __init__(self, src: str, dst: str):
+        super().__init__()
+        self.src = src
+        self.dst = dst
+
+    def run(self) -> None:
+        import os
+        import shutil
+        import stat
+        from pathlib import Path
+
+        src = Path(self.src)
+        dst = Path(self.dst)
+
+        def _remove_readonly(func, path, _exc):
+            try:
+                os.chmod(path, stat.S_IWRITE)
+                func(path)
+            except Exception:
+                pass
+
+        try:
+            total = 0
+            for f in src.rglob("*"):
+                try:
+                    if f.is_file():
+                        total += f.stat().st_size
+                except OSError:
+                    pass
+
+            copied = 0
+            for f in src.rglob("*"):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(src)
+                target = dst / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, target)
+                size = f.stat().st_size
+                copied += size
+                self.progress.emit(
+                    copied,
+                    total,
+                    f"{copied / 1048576:.1f} / {total / 1048576:.1f} MB" if total else "复制中...",
+                )
+            shutil.rmtree(str(src), onerror=_remove_readonly)
+            self.completed.emit(str(dst))
+        except Exception as exc:
+            try:
+                if dst.exists():
+                    shutil.rmtree(str(dst), onerror=_remove_readonly)
+            except Exception:
+                pass
+            self.failed.emit(str(exc))

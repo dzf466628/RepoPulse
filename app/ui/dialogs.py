@@ -33,6 +33,30 @@ from PyQt6.QtWidgets import (
 
 from app import __version__
 from app.core.git_service import GitCommandError, GitService
+
+
+def confirm_delete_dialog(
+    parent, title: str, summary: str, detail: str, confirm_text: str = "确认删除"
+) -> bool:
+    """统一的删除确认弹窗：红色粗体警告、固定宽度、默认聚焦取消。
+
+    所有删除操作共用，避免大小/风格不一致。返回用户是否点了确认删除。
+    """
+    box = QMessageBox(parent)
+    box.setWindowTitle(title)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setText(summary)
+    box.setInformativeText(detail)
+    box.setStyleSheet(
+        "QLabel { color: #FF6B6B; font-size: 13px; font-weight: 700; min-width: 340px; }"
+        "QPushButton { min-width: 90px; padding: 6px 14px; }"
+    )
+    yes = box.addButton(confirm_text, QMessageBox.ButtonRole.DestructiveRole)
+    cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(cancel)
+    box.setEscapeButton(cancel)
+    box.exec()
+    return box.clickedButton() is yes
 from app.models import ProjectConfig, RemoteConfig
 from app.ui.theme import ACCENT_COLOR, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
 
@@ -196,19 +220,14 @@ class ProjectDetailDialog(QDialog):
         layout.addLayout(footer)
 
     def _confirm_delete(self) -> None:
-        confirm = QMessageBox(self)
-        confirm.setWindowTitle("确认删除项目")
-        confirm.setIcon(QMessageBox.Icon.Warning)
-        confirm.setText(
-            "确定删除这个项目吗？\n\n"
-            "将删除本地开发目录、Local Git 目录，以及 NAS/GitHub 中对应的远程仓库。此操作不可恢复。"
-        )
-        delete_button = confirm.addButton("确认删除", QMessageBox.ButtonRole.DestructiveRole)
-        confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        confirm.setFixedHeight(160)
-        confirm.exec()
-        if confirm.clickedButton() is delete_button:
-            self.delete_requested.emit()
+        if not confirm_delete_dialog(
+            self,
+            "!! 删除项目",
+            "确定删除这个项目吗？",
+            "将删除本地开发目录、Local Git 备份目录，以及 NAS/GitHub 上的远程仓库。\n此操作不可恢复。",
+        ):
+            return
+        self.delete_requested.emit()
 
 
 class RepositoryDetailDialog(QDialog):
@@ -220,6 +239,8 @@ class RepositoryDetailDialog(QDialog):
     rename_requested = pyqtSignal(str)
     remove_repository_requested = pyqtSignal()
     pull_requested = pyqtSignal(dict)
+    delete_remote_requested = pyqtSignal(dict)
+    open_target_requested = pyqtSignal(str)
     # 暂存区（项目本地信息）模式
     view_project_requested = pyqtSignal()
     migrate_project_requested = pyqtSignal()
@@ -245,7 +266,7 @@ class RepositoryDetailDialog(QDialog):
         if staging_stats is not None:
             self._build_staging_ui(title, status, status_color, full_icon, staging_stats, body, rich_body)
             return
-        self.setFixedSize(400, 600)
+        self.setFixedSize(400, 560)
 
         self.title_label = DoubleClickLabel(title)
         self.title_label.setStyleSheet("font-size: 19px; font-weight: 700; color: #F4F7FB;")
@@ -395,19 +416,14 @@ class RepositoryDetailDialog(QDialog):
         layout.addLayout(footer)
 
     def _confirm_delete_project(self) -> None:
-        confirm = QMessageBox(self)
-        confirm.setWindowTitle("确认删除项目")
-        confirm.setIcon(QMessageBox.Icon.Warning)
-        confirm.setText(
-            "确定删除这个项目吗？\n\n"
-            "将删除本地工作区文件夹，但保留本地 git 备份仓与 NAS/GitHub 远程仓库，之后可从 git 恢复。"
-        )
-        yes = confirm.addButton("确认删除", QMessageBox.ButtonRole.DestructiveRole)
-        confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        confirm.setFixedHeight(160)
-        confirm.exec()
-        if confirm.clickedButton() is yes:
-            self.delete_project_requested.emit()
+        if not confirm_delete_dialog(
+            self,
+            "!! 删除项目工作区",
+            "确定要删除这个项目吗？",
+            "将删除本地工作区文件夹。\n本地 git 备份仓与 NAS/GitHub 远程仓库保留，之后可从 git 恢复。",
+        ):
+            return
+        self.delete_project_requested.emit()
 
     def _request_rename(self) -> None:
         dialog = QInputDialog(self)
@@ -520,7 +536,7 @@ class RepositoryDetailDialog(QDialog):
             f"QFrame#projectRow {{ background: {PANEL_COLOR}; border: 1px solid {BORDER_COLOR}; border-radius: 4px; }}"
         )
         row_layout = QHBoxLayout(frame)
-        row_layout.setContentsMargins(SPACE_2, SPACE_1, SPACE_2, SPACE_1)
+        row_layout.setContentsMargins(SPACE_2, 4, SPACE_2, 4)
         row_layout.setSpacing(SPACE_1)
 
         name_label = QLabel(str(row.get("name")))
@@ -528,28 +544,42 @@ class RepositoryDetailDialog(QDialog):
         name_label.setToolTip(str(row.get("clone_url") or ""))
         row_layout.addWidget(name_label, 1)
 
-        tag = QLabel("已拉取" if row.get("pulled") else "未拉取")
-        tag.setStyleSheet("color: #6FD08C;" if row.get("pulled") else "color: #E8B87A;")
-        tag.setFixedWidth(52)
-        row_layout.addWidget(tag)
+        btn_compact = "QPushButton { padding: 1px 8px; min-height: 0; }"
+        target = str(row.get("clone_url") or row.get("workspace_path") or "")
+        if not row.get("pulled"):
+            pull_btn = QPushButton("拉取")
+            pull_btn.setStyleSheet(btn_compact + "QPushButton { color: #E8B87A; font-weight: 600; }")
+            pull_btn.clicked.connect(lambda checked, r=row: self.pull_requested.emit(r))
+            row_layout.addWidget(pull_btn)
 
-        pull_btn = QPushButton("拉取")
-        pull_btn.setFixedWidth(52)
-        pull_btn.clicked.connect(lambda checked, r=row: self.pull_requested.emit(r))
-        row_layout.addWidget(pull_btn)
+        view_btn = QPushButton("查看")
+        view_btn.setStyleSheet(btn_compact)
+        view_btn.setEnabled(bool(target))
+        view_btn.clicked.connect(lambda checked, t=target: self.open_target_requested.emit(t))
+        row_layout.addWidget(view_btn)
 
-        if row.get("pulled"):
-            view_btn = QPushButton("查看")
-            view_btn.setFixedWidth(52)
-            target = str(row.get("workspace_path") or "")
-            view_btn.setEnabled(bool(target))
-            view_btn.clicked.connect(
-                lambda checked, pid=row.get("project_id"), t=target:
-                    self.project_view_requested.emit(pid, t)
-            )
-            row_layout.addWidget(view_btn)
+        del_btn = QPushButton("删除")
+        del_btn.setStyleSheet(
+            "QPushButton { padding: 1px 8px; min-height: 0; color: #FF6B6B; font-weight: 700; }"
+            "QPushButton:hover { color: #FF9A9A; border-color: #FF6B6B; }"
+        )
+        del_btn.clicked.connect(lambda checked, r=row: self._confirm_remote_delete(r))
+        row_layout.addWidget(del_btn)
 
         layout.addWidget(frame)
+
+    def _confirm_remote_delete(self, row: dict) -> None:
+        """删除远程仓库：强确认弹窗，醒目警告、默认聚焦取消。"""
+        name = str(row.get("name") or "")
+        if not confirm_delete_dialog(
+            self,
+            "!! 永久删除远程仓库",
+            f"永久删除远程仓库「{name}」？",
+            "将删除全部代码和提交历史，无法恢复。\n本地文件保留。",
+            confirm_text="永久删除",
+        ):
+            return
+        self.delete_remote_requested.emit(row)
 
     def _add_project_row(self, layout: QVBoxLayout, project: dict) -> None:
         project_id = str(project.get("project_id") or "")
@@ -559,19 +589,22 @@ class RepositoryDetailDialog(QDialog):
             f"QFrame#projectRow {{ background: {PANEL_COLOR}; border: 1px solid {BORDER_COLOR}; border-radius: 4px; }}"
         )
         row_layout = QHBoxLayout(row)
-        row_layout.setContentsMargins(SPACE_2, SPACE_1, SPACE_2, SPACE_1)
+        row_layout.setContentsMargins(SPACE_2, 4, SPACE_2, 4)
         row_layout.setSpacing(SPACE_1)
         name = QLabel(str(project.get("name") or "未命名项目"))
         name.setStyleSheet("color: #E8ECF2; font-weight: 600;")
         name.setToolTip(str(project.get("workspace_path") or ""))
         row_layout.addWidget(name, 1)
-        view_button = QPushButton("查看")
-        view_button.setFixedWidth(52)
         project_target = str(project.get("project_target") or project.get("url") or "")
+        view_button = QPushButton("查看")
+        view_button.setStyleSheet("QPushButton { padding: 1px 8px; min-height: 0; }")
         view_button.setEnabled(bool(project_target))
-        view_button.clicked.connect(lambda: self.project_view_requested.emit(project_id, project_target))
+        view_button.clicked.connect(lambda: self.open_target_requested.emit(project_target))
         delete_button = QPushButton("删除")
-        delete_button.setFixedWidth(52)
+        delete_button.setStyleSheet(
+            "QPushButton { padding: 1px 8px; min-height: 0; color: #FF6B6B; font-weight: 700; }"
+            "QPushButton:hover { color: #FF9A9A; border-color: #FF6B6B; }"
+        )
         delete_button.clicked.connect(lambda: self._confirm_delete(project_id, str(project.get("name") or "未命名项目")))
         row_layout.addWidget(view_button)
         row_layout.addWidget(delete_button)
@@ -579,18 +612,13 @@ class RepositoryDetailDialog(QDialog):
         self._project_rows[project_id] = row
 
     def _confirm_delete(self, project_id: str, project_name: str) -> None:
-        confirm = QMessageBox(self)
-        confirm.setWindowTitle("确认移除项目")
-        confirm.setIcon(QMessageBox.Icon.Question)
-        confirm.setText(
-            f"确定从当前 Git 渠道移除“{project_name}”吗？\n\n"
-            "只移除 RepoPulse 中的关联，不会删除本地文件或远程仓库。"
-        )
-        yes_button = confirm.addButton("确认删除", QMessageBox.ButtonRole.AcceptRole)
-        confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        confirm.setFixedHeight(150)
-        confirm.exec()
-        if confirm.clickedButton() is not yes_button:
+        if not confirm_delete_dialog(
+            self,
+            "移除渠道中的项目",
+            f"从渠道移除「{project_name}」？",
+            "只移除 RepoPulse 中的关联，不会删除本地文件或远程仓库。",
+            confirm_text="移除",
+        ):
             return
         self.project_delete_requested.emit(project_id)
         row = self._project_rows.pop(project_id, None)
@@ -771,14 +799,13 @@ class SettingsDialog(QDialog):
         parent = self.parent()
         if not parent or not hasattr(parent, "remotes"):
             return
-        confirm = QMessageBox(self)
-        confirm.setWindowTitle("删除 Git 渠道")
-        confirm.setIcon(QMessageBox.Icon.Warning)
-        confirm.setText(f"确定删除渠道“{remote.label or kind}”吗？\n\n仅移除配置，不会删除远程仓库或本地文件。")
-        yes = confirm.addButton("删除", QMessageBox.ButtonRole.DestructiveRole)
-        confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        confirm.exec()
-        if confirm.clickedButton() is not yes:
+        if not confirm_delete_dialog(
+            self,
+            "删除 Git 渠道",
+            f"删除渠道「{remote.label or kind}」？",
+            "仅移除 RepoPulse 中的渠道配置，不会删除远程仓库或本地文件。",
+            confirm_text="删除渠道",
+        ):
             return
         del parent.remotes[kind]
         parent.store.global_remotes = parent.remotes

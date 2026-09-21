@@ -54,7 +54,7 @@ from app.core.git_service import GitService
 from app.core.updater import UPDATE_URL, UpdateCheckThread
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
-from app.ui.dialogs import GitDialog, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog
+from app.ui.dialogs import GitDialog, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog, confirm_delete_dialog
 from app.ui.update_dialog import UpdateDownloadDialog
 from app.ui.floating_widget import DockSlot, FloatingStatusWidget
 from PyQt6.QtSvg import QSvgRenderer
@@ -2125,6 +2125,8 @@ class MainWindow(QMainWindow):
             detail.rename_requested.connect(lambda name: self._rename_card(key, name))
             detail.remove_repository_requested.connect(lambda: self._remove_repository_card(key, detail))
             detail.pull_requested.connect(lambda row, r=remote: self._pull_remote_repo(row, r))
+            detail.delete_remote_requested.connect(lambda row, r=remote: self._delete_remote_repo(row, r, detail))
+            detail.open_target_requested.connect(self._open_repository_target)
             if remote is not None and remote.kind in {"github", "nas", "gitea"} and key != "__staging__":
                 detail.set_remote_loading()
                 self._start_discover_repos(detail, remote)
@@ -2157,6 +2159,18 @@ class MainWindow(QMainWindow):
         self._repos_worker.repos_ready.connect(on_ready)
         self._repos_worker.failed.connect(on_failed)
         self._repos_worker.start()
+
+    def _delete_remote_repo(self, row: dict, remote, detail) -> None:
+        """未拉取仓库：确认后删除远程仓库并刷新列表。"""
+        name = str(row.get("name") or "")
+        try:
+            GitService().delete_host_repository(remote, name)
+            self._append_log(f"已删除远程仓库：{name}")
+        except Exception as exc:
+            QMessageBox.warning(self, "删除失败", str(exc))
+            return
+        if remote is not None and remote.kind in {"github", "nas", "gitea"}:
+            self._start_discover_repos(detail, remote)
 
     def _pull_remote_repo(self, row: dict, remote) -> None:
         """详情框里点"拉取"：已落地的项目走快进更新；未落地的选目录 clone。"""
@@ -2225,6 +2239,7 @@ class MainWindow(QMainWindow):
             self._append_log(f"已拉取仓库到本地：{dir_str}")
 
         self._clone_worker.log_message.connect(self._append_log)
+        self._clone_worker.detailed_progress.connect(self._on_detailed_progress)
         self._clone_worker.completed.connect(on_cloned)
         self._clone_worker.failed.connect(lambda m: (self._hide_busy_dialog(), self._append_log(f"拉取失败：{m}")))
         self._clone_worker.start()
@@ -2305,12 +2320,48 @@ class MainWindow(QMainWindow):
         if new_path.exists():
             QMessageBox.warning(self, "迁移", f"目标已存在同名目录：{new_path}")
             return
-        try:
-            shutil.move(project.workspace_path, str(new_path))
-        except Exception as exc:
-            QMessageBox.warning(self, "迁移失败", str(exc))
+
+        src = Path(project.workspace_path)
+        same_drive = src.anchor == new_path.anchor
+
+        # 同盘：直接重命名，瞬间完成
+        if same_drive:
+            try:
+                shutil.move(str(src), str(new_path))
+            except Exception as exc:
+                QMessageBox.warning(self, "迁移失败", str(exc))
+                return
+            self._finish_migration(dialog, project, str(new_path))
             return
-        project.workspace_path = str(new_path)
+
+        # 跨盘：后台逐文件复制 + 真实字节进度条
+        from app.workers import MigrateWorker
+
+        self._show_busy_dialog("正在迁移项目...")
+        self._migrate_worker = MigrateWorker(str(src), str(new_path))
+        self._migrate_worker.progress.connect(
+            lambda c, t, d: (
+                self.busy_dialog.set_detailed_progress("正在迁移", c, t, d)
+                if self.busy_dialog and _qobj_alive(self.busy_dialog)
+                else None
+            )
+        )
+        self._migrate_worker.failed.connect(
+            lambda m: (
+                self._hide_busy_dialog(),
+                QMessageBox.warning(self, "迁移失败", m),
+            )
+        )
+        self._migrate_worker.completed.connect(
+            lambda new: (
+                self._hide_busy_dialog(),
+                self._finish_migration(dialog, project, new),
+            )
+        )
+        self._migrate_worker.start()
+
+    def _finish_migration(self, dialog, project, new_path: str) -> None:
+        project.workspace_path = new_path
         self.store.save(self.projects)
         dialog.accept()
         self._reload_project_list(select_id=project.project_id)
@@ -2373,17 +2424,13 @@ class MainWindow(QMainWindow):
         if not project or key == "__staging__" or key not in self.remotes:
             return
         remote = self.remotes[key]
-        confirm = QMessageBox(self)
-        confirm.setWindowTitle("确认删除仓库卡片")
-        confirm.setIcon(QMessageBox.Icon.Question)
-        confirm.setText(
-            f"确定删除“{remote.label or remote.kind}”这个仓库卡片吗？\n\n"
-            "只删除 RepoPulse 中的配置，不会删除本地文件或远程仓库。"
-        )
-        yes_button = confirm.addButton("确认删除", QMessageBox.ButtonRole.AcceptRole)
-        confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-        confirm.exec()
-        if confirm.clickedButton() is not yes_button:
+        if not confirm_delete_dialog(
+            self,
+            "删除仓库卡片",
+            f"删除「{remote.label or remote.kind}」仓库卡片？",
+            "只删除 RepoPulse 中的配置，不会删除本地文件或远程仓库。",
+            confirm_text="删除卡片",
+        ):
             return
         self.remotes.pop(key, None)
         self.card_order = [item for item in self.card_order if item != key]
@@ -2477,21 +2524,6 @@ class MainWindow(QMainWindow):
                 if not ok:
                     return
                 commit_message = commit_message.strip() or default_message
-        if not quick and not is_uncreated:
-            confirm = QMessageBox(self)
-            confirm.setWindowTitle("确认提交并同步")
-            confirm.setIcon(QMessageBox.Icon.Question)
-            action_text = (
-                f"将先提交当前修改（{commit_message}），再同步到全部 Git 渠道。"
-                if commit_message
-                else "当前没有待提交修改，将直接同步已提交内容。"
-            )
-            confirm.setText(f"确定处理“{project.name}”吗？\n\n{action_text}")
-            yes_button = confirm.addButton("提交并同步", QMessageBox.ButtonRole.AcceptRole)
-            confirm.addButton("取消", QMessageBox.ButtonRole.RejectRole)
-            confirm.exec()
-            if confirm.clickedButton() is not yes_button:
-                return
         self._start_sync(project, commit_message, creating=is_uncreated)
 
     def _set_sync_busy(self, busy: bool) -> None:
@@ -2547,6 +2579,7 @@ class MainWindow(QMainWindow):
         self.pull_worker = PullWorker(project)
         self.pull_worker.log_message.connect(self._append_log)
         self.pull_worker.progress_changed.connect(self._on_progress_changed)
+        self.pull_worker.detailed_progress.connect(self._on_detailed_progress)
         self.pull_worker.result_ready.connect(self._on_pull_result)
         self.pull_worker.failed.connect(lambda message: self._append_log(f"拉取失败：{message}"))
         self.pull_worker.completed.connect(self._on_pull_completed)
