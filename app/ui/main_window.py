@@ -49,10 +49,13 @@ from PyQt6.QtWidgets import (
     QStyleOptionViewItem,
 )
 
+from app import __version__
 from app.core.git_service import GitService
+from app.core.updater import UPDATE_URL, UpdateCheckThread
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
 from app.ui.dialogs import GitDialog, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog
+from app.ui.update_dialog import UpdateDownloadDialog
 from app.ui.floating_widget import DockSlot, FloatingStatusWidget
 from PyQt6.QtSvg import QSvgRenderer
 from app.ui.theme import (
@@ -824,7 +827,10 @@ class MainWindow(QMainWindow):
         self._reload_project_list()
         self._apply_sync_settings()
         self._build_floating_widget()
+        self._update_thread: UpdateCheckThread | None = None
+        self._update_check_started = False
         QTimer.singleShot(250, self.refresh_all)
+        QTimer.singleShot(2500, self._check_update_auto)
 
     def showEvent(self, event):  # noqa: N802 - Qt API
         super().showEvent(event)
@@ -864,12 +870,24 @@ class MainWindow(QMainWindow):
         # 多个项目时每 20 秒轮播
         self._floating_cycle_timer = QTimer(self)
         self._floating_cycle_timer.setInterval(20000)
-        self._floating_cycle_timer.timeout.connect(self._cycle_to_next_project)
+        self._floating_cycle_timer.timeout.connect(self._auto_cycle_project)
         self._floating_cycle_timer.start()
 
     def _on_floating_dock_changed(self, docked: bool) -> None:
         if hasattr(self, "dock_slot"):
             self.dock_slot.set_occupied(docked)
+
+    def _auto_cycle_project(self) -> None:
+        """自动轮播门控：只在主窗口隐藏/最小化到托盘、且悬浮窗被拖出独立显示时才切换。
+
+        主窗口正常显示时不自动跳项目（避免打断查看）；用户手动点悬浮窗仍无条件切换。
+        """
+        fw = getattr(self, "floating", None)
+        if fw is None or fw.docked or not fw.isVisible():
+            return
+        if self.isVisible() and not self.isMinimized():
+            return
+        self._cycle_to_next_project()
 
     def _cycle_to_next_project(self) -> None:
         enabled_rows = [i for i, p in enumerate(self.projects) if p.sync_enabled]
@@ -956,6 +974,16 @@ class MainWindow(QMainWindow):
                 if thread.isRunning():
                     thread.terminate()
                     thread.wait(2000)
+            except RuntimeError:
+                pass
+        update_thread = getattr(self, "_update_thread", None)
+        if update_thread is not None:
+            try:
+                if update_thread.isRunning():
+                    update_thread.wait(2000)
+                if update_thread.isRunning():
+                    update_thread.terminate()
+                    update_thread.wait(2000)
             except RuntimeError:
                 pass
 
@@ -1072,7 +1100,7 @@ class MainWindow(QMainWindow):
         )
         if not self.app_icon.isNull():
             title_icon.setPixmap(self.app_icon.pixmap(40, 40))
-        self.title_version = QLabel("v0.2.2")
+        self.title_version = QLabel(f"v{__version__}")
         self.title_version.setStyleSheet("color: #718096; font-size: 10px; padding-bottom: 4px;")
         self.title_version.setAlignment(Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         toolbar.addWidget(title_icon, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -2699,10 +2727,102 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(percentage)
         self._set_progress_style("running" if completed < total else "success")
 
+    # ------------------------------------------------------- 应用自动更新
+    def _check_update_auto(self) -> None:
+        """启动 2.5 秒后静默自检；有更新才提示，失败/无更新都不打扰用户。"""
+        if self._update_check_started:
+            return
+        self._start_update_check(silent=True)
+
+    def _check_update_manual(self) -> None:
+        """设置窗口里手动点“检查更新”：任何结果都明确反馈。"""
+        if self._update_thread is not None and self._update_thread.isRunning():
+            QMessageBox.information(self, "检查更新", "正在检查，请稍候 ...")
+            return
+        self._start_update_check(silent=False)
+
+    def _start_update_check(self, silent: bool) -> None:
+        self._update_check_started = True
+        self._update_thread = UpdateCheckThread(__version__, UPDATE_URL, self)
+        self._update_thread.result_ready.connect(lambda result: self._on_update_result(result, silent))
+        self._update_thread.finished.connect(self._on_update_thread_finished)
+        self._update_thread.start()
+
+    def _on_update_thread_finished(self) -> None:
+        self._update_thread = None
+
+    def _on_update_result(self, result: dict, silent: bool) -> None:
+        status = result.get("status")
+        if status == "update":
+            self._show_update_dialog(result)
+            return
+        if silent:
+            return
+        if status == "latest":
+            QMessageBox.information(
+                self, "检查更新", f"当前已是最新版本。\n当前版本：v{__version__}"
+            )
+        elif status == "no_installer":
+            QMessageBox.information(
+                self, "检查更新",
+                "暂未在更新服务器上发现安装包。\n"
+                f"更新目录：{result.get('url', UPDATE_URL)}",
+            )
+        else:
+            QMessageBox.warning(
+                self, "检查更新",
+                "检查更新失败（可能未联网）：\n" + str(result.get("reason", "未知错误")),
+            )
+
+    def _show_update_dialog(self, result: dict) -> None:
+        box = QMessageBox(self)
+        box.setWindowTitle("发现新版本")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"发现新版本 v{result['version']}，是否立即下载并安装？")
+        box.setInformativeText("下载完成后将自动关闭软件并静默升级，随后重新启动。")
+        btn_yes = box.addButton("立即更新", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("稍后", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is btn_yes:
+            self._download_and_install_update(result["version"], result["url"])
+
+    def _download_and_install_update(self, version: str, url: str) -> None:
+        dlg = UpdateDownloadDialog(version, url, self)
+        dlg.download_ok.connect(self._launch_installer)
+        dlg.exec()
+
+    def _launch_installer(self, installer_path: str) -> None:
+        import subprocess
+        import sys
+        try:
+            kwargs = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            subprocess.Popen(
+                [
+                    installer_path,
+                    "/SILENT",
+                    "/SUPPRESSMSGBOXES",
+                    "/NORESTART",
+                    "/CLOSEAPPLICATIONS",
+                ],
+                **kwargs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(
+                self, "更新",
+                "已下载更新，但无法自动启动安装程序：\n"
+                f"{exc}\n\n请手动运行：\n{installer_path}",
+            )
+            return
+        # 交给安装程序关闭并替换本程序，随后由安装包 [Run] 重新拉起新版本
+        self._exit_from_tray()
+
     def open_settings(self) -> None:
         dialog = SettingsDialog(self)
         dialog.add_git_requested.connect(lambda git_dialog: self._submit_settings_git(dialog, git_dialog))
         dialog.settings_changed.connect(self._apply_sync_settings)
+        dialog.check_update_requested.connect(self._check_update_manual)
         dialog.exec()
 
     @staticmethod

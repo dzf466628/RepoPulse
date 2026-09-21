@@ -4,9 +4,10 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
-from PyQt6.QtCore import QSettings, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QSettings, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QIcon
 from PyQt6.QtWidgets import (
+    QApplication,
     QComboBox,
     QCheckBox,
     QAbstractSpinBox,
@@ -30,9 +31,20 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app import __version__
 from app.core.git_service import GitCommandError, GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.ui.theme import ACCENT_COLOR, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
+
+
+# 关于页展示的第三方开源组件：(名称, 许可证, 作者/机构)
+ABOUT_COMPONENTS = [
+    ("PyQt6 (Qt for Python)", "GPL v3 / Commercial", "Riverbank Computing"),
+    ("Git", "GPL v2", "Git Project"),
+    ("PyInstaller", "GPL v2+ with Bootloader Exception", "PyInstaller Development Team"),
+    ("Inno Setup 6", "Inno Setup License", "Jordan Russell"),
+    ("简体中文翻译", "Inno Setup 社区翻译", "kira-96"),
+]
 
 
 GIT_TYPES = [
@@ -481,6 +493,7 @@ class SettingsDialog(QDialog):
 
     add_git_requested = pyqtSignal(object)
     settings_changed = pyqtSignal()
+    check_update_requested = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -806,6 +819,21 @@ class SettingsDialog(QDialog):
         form.addRow("默认操作", self.close_action_combo)
         layout.addWidget(title)
         layout.addLayout(form)
+
+        update_title = QLabel("版本更新")
+        update_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #F4F7FB; margin-top: 10px;")
+        update_row = QHBoxLayout()
+        update_row.setSpacing(SPACE_2)
+        self.check_update_btn = QPushButton("检查更新")
+        self.check_update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.check_update_btn.clicked.connect(self.check_update_requested.emit)
+        self.version_hint = QLabel(f"当前版本 v{__version__}")
+        self.version_hint.setStyleSheet("color: #9FB4C2; font-size: 11px;")
+        update_row.addWidget(self.check_update_btn)
+        update_row.addWidget(self.version_hint)
+        update_row.addStretch(1)
+        layout.addWidget(update_title)
+        layout.addLayout(update_row)
         layout.addStretch(1)
         return page
 
@@ -820,15 +848,121 @@ class SettingsDialog(QDialog):
 
     def _build_about_page(self) -> QWidget:
         page = QWidget()
-        layout = QVBoxLayout(page)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
+        body = QWidget()
+        body.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(body)
         layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
-        title = QLabel("关于 RepoPulse")
-        title.setStyleSheet("font-size: 17px; font-weight: 700; color: #F4F7FB;")
-        version = QLabel("Git 状态台 · v0.2.2")
-        layout.addWidget(title)
-        layout.addWidget(version)
+        layout.setSpacing(10)
+
+        # 顶部：图标 + 名称 + 版本徽章
+        top = QHBoxLayout()
+        top.setSpacing(12)
+        icon_lbl = QLabel()
+        icon_lbl.setFixedSize(48, 48)
+        icon_path = Path(__file__).resolve().parents[2] / "RepoPulse.png"
+        if icon_path.is_file():
+            icon = QIcon(str(icon_path))
+            screen = self.screen() or QApplication.primaryScreen()
+            dpr = screen.devicePixelRatio() if screen else 1.0
+            pm = icon.pixmap(int(48 * dpr), int(48 * dpr))
+            pm.setDevicePixelRatio(dpr)
+            icon_lbl.setPixmap(pm)
+        top.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignTop)
+
+        name_box = QVBoxLayout()
+        name_box.setSpacing(4)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        name_lbl = QLabel("RepoPulse")
+        name_lbl.setStyleSheet("color: #F4F7FB; font-size: 20px; font-weight: 700;")
+        title_row.addWidget(name_lbl)
+        ver_lbl = QLabel(f"v{__version__}")
+        ver_lbl.setStyleSheet(
+            f"color: #04202A; background: {ACCENT_COLOR}; border-radius: 8px;"
+            " padding: 2px 10px; font-size: 12px; font-weight: 700;"
+        )
+        title_row.addWidget(ver_lbl)
+        title_row.addStretch()
+        name_box.addLayout(title_row)
+        en_lbl = QLabel("Git Status Desk")
+        en_lbl.setStyleSheet("color: #8FA3B2; font-size: 11px;")
+        name_box.addWidget(en_lbl)
+        top.addLayout(name_box, 1)
+        layout.addLayout(top)
+
+        desc = QLabel(
+            "多仓库 Git 状态监控与一键同步工具——本地 / NAS / GitHub 多渠道状态总览、"
+            "提交同步、定时同步与悬浮窗状态显示。"
+        )
+        desc.setStyleSheet("color: #C2CED9; font-size: 12px;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        layout.addWidget(self._about_separator())
+
+        sec1 = QLabel("开源许可")
+        sec1.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 12px; font-weight: 700;")
+        layout.addWidget(sec1)
+        lic = QLabel(
+            "本软件以 <b>GNU GPL v3</b> 开源，你可以自由使用、修改和再分发。<br>"
+            "程序按“原样”提供，不附带任何担保。"
+        )
+        lic.setStyleSheet("color: #C2CED9; font-size: 12px;")
+        lic.setWordWrap(True)
+        layout.addWidget(lic)
+
+        sec2 = QLabel("使用的第三方开源组件")
+        sec2.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 12px; font-weight: 700;")
+        layout.addWidget(sec2)
+        for comp_name, comp_license, comp_author in ABOUT_COMPONENTS:
+            row = QLabel(f"•&nbsp;&nbsp;<b>{comp_name}</b> — {comp_license} — {comp_author}")
+            row.setStyleSheet("color: #AEBECB; font-size: 12px;")
+            row.setTextFormat(Qt.TextFormat.RichText)
+            row.setWordWrap(True)
+            layout.addWidget(row)
+
+        layout.addWidget(self._about_separator())
+
+        contact = QHBoxLayout()
+        contact.setSpacing(18)
+        qq_btn = QLabel("📧 联系 QQ：3140992714（点击复制）")
+        qq_btn.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 12px;")
+        qq_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        qq_btn.mousePressEvent = lambda event, lbl=qq_btn: self._copy_qq(lbl)
+        contact.addWidget(qq_btn)
+        web_btn = QLabel("🌐 https://duadu.cc")
+        web_btn.setStyleSheet(f"color: {ACCENT_COLOR}; font-size: 12px;")
+        web_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        web_btn.mousePressEvent = lambda event: QDesktopServices.openUrl(QUrl("https://duadu.cc"))
+        contact.addWidget(web_btn)
+        contact.addStretch()
+        layout.addLayout(contact)
+
         layout.addStretch(1)
+        scroll.setWidget(body)
+        outer.addWidget(scroll)
         return page
+
+    @staticmethod
+    def _about_separator() -> QFrame:
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet(f"background: {BORDER_COLOR}; max-height: 1px;")
+        return line
+
+    @staticmethod
+    def _copy_qq(label: QLabel) -> None:
+        QApplication.clipboard().setText("3140992714")
+        label.setText("✅ QQ 3140992714 已复制到剪贴板")
+        QTimer.singleShot(1500, lambda: label.setText("📧 联系 QQ：3140992714（点击复制）"))
 
 class ProjectDialog(QDialog):
     """创建项目脚手架，或选择已有目录接入并准备 Git 渠道。"""

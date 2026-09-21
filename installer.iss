@@ -1,5 +1,5 @@
 #define AppName "RepoPulse"
-#define AppVersion "0.2.2"
+#define AppVersion "0.2.3"
 #define AppPublisher "RepoPulse"
 #define AppExeName "RepoPulse.exe"
 
@@ -21,6 +21,9 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
+; 自动更新静默升级：安装时自动关闭正在运行的旧版本，安装完成后由 [Run] 拉起新版本
+CloseApplications=yes
+RestartApplications=yes
 VersionInfoVersion={#AppVersion}.0
 VersionInfoProductVersion={#AppVersion}
 VersionInfoDescription=RepoPulse Git 状态管理工具安装程序
@@ -50,4 +53,5 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: 
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "启动 {#AppName}"; Flags: nowait postinstall skipifsilent
+; 安装完成后启动软件。不加 skipifsilent：自动更新走静默安装时也能自动重启新版本。
+Filename: "{app}\{#AppExeName}"; Description: "启动 {#AppName}"; Flags: nowait postinstall runasoriginaluser
