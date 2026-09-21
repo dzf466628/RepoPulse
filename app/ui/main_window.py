@@ -3226,6 +3226,10 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("%p%")
         self._set_progress_style("running")
         self._append_log("开始刷新状态……")
+        # 每轮刷新重新检测 GitHub：上一轮因代理未开而短路过的仓库不能跨轮一直
+        # 判成“未代理”。本批次内若某项目 GitHub 失败，仍会把其地址加入集合，
+        # 让本批次后续项目跳过重复探测（性能），但下一轮刷新会重新尝试。
+        self._github_bad.clear()
         values = self._sync_settings()
         self.worker = StatusWorker(projects, ignore_github_failure=bool(values["ignore_github"]), skip_github=self._github_bad)
         self.worker.project_ready.connect(self._on_project_ready)
