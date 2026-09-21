@@ -235,3 +235,52 @@ class LocalStatusWorker(QThread):
             self.failed.emit(str(exc))
         finally:
             self.completed.emit()
+
+
+class DiscoverReposWorker(QThread):
+    """后台读取某 Git 渠道（GitHub/Gitea/NAS）远程账号下的真实仓库列表。"""
+
+    repos_ready = pyqtSignal(object)  # list[dict]
+    failed = pyqtSignal(str)
+    completed = pyqtSignal()
+
+    def __init__(self, remote):
+        super().__init__()
+        self.remote = remote
+
+    def run(self) -> None:
+        try:
+            service = GitService()
+            repos = service.discover_host_repositories(self.remote)
+            self.repos_ready.emit(repos)
+        except Exception as exc:  # pragma: no cover
+            self.failed.emit(str(exc))
+        finally:
+            self.completed.emit()
+
+
+class CloneRepoWorker(QThread):
+    """后台把远程仓库 clone 到本地目录（用于拉取尚未落地的远程仓库）。"""
+
+    log_message = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    completed = pyqtSignal(str)  # 成功后返回目标目录
+
+    def __init__(self, clone_url: str, target_dir: str):
+        super().__init__()
+        self.clone_url = clone_url
+        self.target_dir = target_dir
+
+    def run(self) -> None:
+        try:
+            service = GitService(log=self.log_message.emit)
+            service._run(
+                ["clone", "--progress", str(self.clone_url), str(self.target_dir)],
+                timeout=600,
+                capture_progress=True,
+                progress_task="克隆仓库",
+            )
+            self.completed.emit(str(self.target_dir))
+        except Exception as exc:  # pragma: no cover
+            self.failed.emit(str(exc))
+

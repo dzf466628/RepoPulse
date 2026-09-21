@@ -2124,12 +2124,110 @@ class MainWindow(QMainWindow):
             detail.open_repository_requested.connect(self._open_repository_target)
             detail.rename_requested.connect(lambda name: self._rename_card(key, name))
             detail.remove_repository_requested.connect(lambda: self._remove_repository_card(key, detail))
+            detail.pull_requested.connect(lambda row, r=remote: self._pull_remote_repo(row, r))
+            if remote is not None and remote.kind in {"github", "nas", "gitea"} and key != "__staging__":
+                detail.set_remote_loading()
+                self._start_discover_repos(detail, remote)
             if key == "__staging__":
                 detail.view_project_requested.connect(lambda: self._open_project_folder(project))
                 detail.migrate_project_requested.connect(lambda: self._migrate_project(detail, project))
                 detail.rename_project_requested.connect(lambda: self._rename_project(detail, project))
                 detail.delete_project_requested.connect(lambda: self._delete_from_staging_detail(detail, project))
             detail.exec()
+
+    def _start_discover_repos(self, detail, remote) -> None:
+        """后台读取远程账号下的真实仓库列表，填进详情对话框。"""
+        from app.workers import DiscoverReposWorker
+
+        def on_ready(repos):
+            if not detail.isVisible():
+                return
+            local_entries = [
+                {"project_id": p.project_id, "name": p.name, "workspace_path": p.workspace_path}
+                for p in self.projects
+            ]
+            detail.apply_remote_repos(repos, local_entries)
+
+        def on_failed(msg):
+            if not detail.isVisible():
+                return
+            detail.show_remote_error(msg, lambda: self._start_discover_repos(detail, remote))
+
+        self._repos_worker = DiscoverReposWorker(remote)
+        self._repos_worker.repos_ready.connect(on_ready)
+        self._repos_worker.failed.connect(on_failed)
+        self._repos_worker.start()
+
+    def _pull_remote_repo(self, row: dict, remote) -> None:
+        """详情框里点"拉取"：已落地的项目走快进更新；未落地的选目录 clone。"""
+        from app.workers import CloneRepoWorker
+
+        # 已拉取：找本地项目，直接后台快进（不覆盖本地提交）
+        if row.get("pulled") and row.get("project_id"):
+            project = next(
+                (p for p in self.projects if p.project_id == row.get("project_id")), None
+            )
+            if project is not None:
+                if self.sync_worker and self.sync_worker.isRunning():
+                    self._append_log("同步进行中，请稍后再拉取。")
+                    return
+                self._show_busy_dialog("正在拉取最新提交")
+                self.pull_worker = PullWorker(project)
+                self.pull_worker.log_message.connect(self._append_log)
+                self.pull_worker.progress_changed.connect(self._on_progress_changed)
+                self.pull_worker.result_ready.connect(self._on_pull_result)
+                self.pull_worker.failed.connect(lambda m: self._append_log(f"拉取失败：{m}"))
+                self.pull_worker.completed.connect(self._on_pull_completed)
+                self.pull_worker.start()
+                return
+
+        # 未拉取：弹新建项目窗，选本地目录
+        from app.ui.dialogs import ProjectDialog
+        dialog = ProjectDialog(self)
+        dialog.setWindowTitle("拉取远程仓库")
+        dialog.name_edit.setText(str(row.get("name") or ""))
+        dialog.existing_check.setChecked(False)
+        if not dialog.exec():
+            return
+        root = Path(dialog.workspace_edit.text().strip()).expanduser()
+        name = dialog.name_edit.text().strip()
+        if not str(root) or not name:
+            QMessageBox.warning(self, "拉取", "请填写项目名称和所在目录。")
+            return
+        target = root / name
+        if target.exists():
+            QMessageBox.warning(self, "拉取", f"目录已存在：\n{target}\n\n已有项目请直接用'拉取'更新，不要重复拉取。")
+            return
+        clone_url = str(row.get("clone_url") or "")
+        if not clone_url and remote is not None:
+            clone_url = getattr(remote, "service_url", "") or ""
+        if not clone_url:
+            QMessageBox.warning(self, "拉取", "该仓库没有可用的 clone 地址。")
+            return
+
+        self._show_busy_dialog(f"正在克隆 {name}")
+        self._append_log(f"开始拉取仓库：{clone_url} -> {target}")
+        self._clone_worker = CloneRepoWorker(clone_url, str(target))
+
+        def on_cloned(dir_str: str) -> None:
+            project = ProjectConfig(
+                project_id=uuid.uuid4().hex,
+                name=name,
+                workspace_path=dir_str,
+                default_branch=str(row.get("default_branch") or "main"),
+                remotes=self.remotes,
+            )
+            self.projects.append(project)
+            self.store.save(self.projects)
+            self._reload_project_list(select_id=project.project_id)
+            self._render_cards(None)
+            self._hide_busy_dialog()
+            self._append_log(f"已拉取仓库到本地：{dir_str}")
+
+        self._clone_worker.log_message.connect(self._append_log)
+        self._clone_worker.completed.connect(on_cloned)
+        self._clone_worker.failed.connect(lambda m: (self._hide_busy_dialog(), self._append_log(f"拉取失败：{m}")))
+        self._clone_worker.start()
 
     def _detail_projects(
         self,
@@ -2516,6 +2614,9 @@ class MainWindow(QMainWindow):
         fw = getattr(self, "floating", None)
         if fw is not None:
             fw.channel_finished(key, ok)
+            fw.set_overall_progress(
+                self._sync_channels_done, self._sync_channels_total
+            )
 
     def _on_detailed_progress(self, task_name: str, current: int, total: int, detail: str) -> None:
         """处理后台任务的细粒度进度（克隆/扫描/全量备份）。

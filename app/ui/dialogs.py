@@ -219,6 +219,7 @@ class RepositoryDetailDialog(QDialog):
     open_repository_requested = pyqtSignal(str)
     rename_requested = pyqtSignal(str)
     remove_repository_requested = pyqtSignal()
+    pull_requested = pyqtSignal(dict)
     # 暂存区（项目本地信息）模式
     view_project_requested = pyqtSignal()
     migrate_project_requested = pyqtSignal()
@@ -441,6 +442,115 @@ class RepositoryDetailDialog(QDialog):
         layout.addStretch(1)
         return container
 
+
+    # -------------------------------------------------- 远程真实仓库列表
+    def set_remote_loading(self) -> None:
+        """打开详情时：远程仓库列表还在后台拉取，先显示加载态。"""
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        tip = QLabel("正在读取远程仓库列表…")
+        tip.setStyleSheet("color: #8A97AA; padding: 12px;")
+        lay.addWidget(tip)
+        lay.addStretch(1)
+        self.projects_scroll.setWidget(container)
+
+    def show_remote_error(self, message: str, retry_callable) -> None:
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(0, 0, 0, 0)
+        tip = QLabel(f"读取远程仓库失败：\n{message}")
+        tip.setStyleSheet("color: #E88A8A; padding: 12px;")
+        tip.setWordWrap(True)
+        retry = QPushButton("重试")
+        retry.setFixedHeight(28)
+        retry.clicked.connect(retry_callable)
+        lay.addWidget(tip)
+        lay.addWidget(retry, 0, Qt.AlignmentFlag.AlignLeft)
+        lay.addStretch(1)
+        self.projects_scroll.setWidget(container)
+
+    def apply_remote_repos(self, repos: list, local_projects: list) -> None:
+        """按"本地已拉取 / 未拉取"分组展示远程真实仓库。"""
+        local_by_name = {str(p.get("name", "")).casefold(): p for p in local_projects}
+        pulled_rows: list = []
+        missing_rows: list = []
+        for repo in repos:
+            name = str(repo.get("name") or "")
+            if not name:
+                continue
+            local = local_by_name.get(name.casefold())
+            row = {
+                "name": name,
+                "clone_url": repo.get("clone_url") or repo.get("url") or "",
+                "default_branch": repo.get("default_branch") or "",
+                "project_id": str(local.get("project_id", "")) if local else "",
+                "workspace_path": str(local.get("workspace_path", "")) if local else "",
+                "pulled": local is not None,
+            }
+            (pulled_rows if local is not None else missing_rows).append(row)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(SPACE_1)
+        if pulled_rows:
+            head = QLabel(f"已拉取到本地（{len(pulled_rows)}）")
+            head.setStyleSheet("color: #6FD08C; font-weight: 600; padding-top: 4px;")
+            layout.addWidget(head)
+            for row in pulled_rows:
+                self._add_remote_repo_row(layout, row)
+        if missing_rows:
+            head = QLabel(f"远程有、本地未拉取（{len(missing_rows)}）")
+            head.setStyleSheet("color: #E8B87A; font-weight: 600; padding-top: 6px;")
+            layout.addWidget(head)
+            for row in missing_rows:
+                self._add_remote_repo_row(layout, row)
+        if not repos:
+            empty = QLabel("远程账号下还没有仓库")
+            empty.setStyleSheet("color: #8A97AA; padding: 8px 0;")
+            layout.addWidget(empty)
+        layout.addStretch(1)
+        self.projects_scroll.setWidget(container)
+
+    def _add_remote_repo_row(self, layout: QVBoxLayout, row: dict) -> None:
+        frame = QFrame()
+        frame.setObjectName("projectRow")
+        frame.setStyleSheet(
+            f"QFrame#projectRow {{ background: {PANEL_COLOR}; border: 1px solid {BORDER_COLOR}; border-radius: 4px; }}"
+        )
+        row_layout = QHBoxLayout(frame)
+        row_layout.setContentsMargins(SPACE_2, SPACE_1, SPACE_2, SPACE_1)
+        row_layout.setSpacing(SPACE_1)
+
+        name_label = QLabel(str(row.get("name")))
+        name_label.setStyleSheet("color: #E8ECF2; font-weight: 600;")
+        name_label.setToolTip(str(row.get("clone_url") or ""))
+        row_layout.addWidget(name_label, 1)
+
+        tag = QLabel("已拉取" if row.get("pulled") else "未拉取")
+        tag.setStyleSheet("color: #6FD08C;" if row.get("pulled") else "color: #E8B87A;")
+        tag.setFixedWidth(52)
+        row_layout.addWidget(tag)
+
+        pull_btn = QPushButton("拉取")
+        pull_btn.setFixedWidth(52)
+        pull_btn.clicked.connect(lambda checked, r=row: self.pull_requested.emit(r))
+        row_layout.addWidget(pull_btn)
+
+        if row.get("pulled"):
+            view_btn = QPushButton("查看")
+            view_btn.setFixedWidth(52)
+            target = str(row.get("workspace_path") or "")
+            view_btn.setEnabled(bool(target))
+            view_btn.clicked.connect(
+                lambda checked, pid=row.get("project_id"), t=target:
+                    self.project_view_requested.emit(pid, t)
+            )
+            row_layout.addWidget(view_btn)
+
+        layout.addWidget(frame)
+
     def _add_project_row(self, layout: QVBoxLayout, project: dict) -> None:
         project_id = str(project.get("project_id") or "")
         row = QFrame()
@@ -523,7 +633,7 @@ class SettingsDialog(QDialog):
         content.addWidget(self.pages, 1)
 
         self.close_button = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Close
+            QDialogButtonBox.StandardButton.Close
         )
         _compact_button_box(self.close_button)
         self.close_button.accepted.connect(self.accept)
@@ -567,6 +677,9 @@ class SettingsDialog(QDialog):
         self.git_action_box = action_item.widget() if action_item else None
         if self.git_action_box:
             self.git_action_box.setParent(self)
+            ok_btn = self.git_action_box.button(QDialogButtonBox.StandardButton.Ok)
+            if ok_btn is not None:
+                ok_btn.setText("添加")
         layout.addWidget(self.git_form, 1)
         self.git_form.show()
         return page
