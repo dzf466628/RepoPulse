@@ -638,6 +638,17 @@ class GitService:
                     except GitCommandError:
                         pass
                     self._run(["remote", "add", remote_name, target_url], cwd=source)
+                    # 首次推送同样要过一遍大文件预演，避免接入已有仓库时
+                    # 把历史里的超大文件（如 release/*.exe）推上去被服务端拒绝。
+                    blockers = self._outgoing_oversized_blobs(source, remote, target_url, branch)
+                    if blockers:
+                        shown = "、".join(f"{path}（{size / 1048576:.1f} MB）" for path, size in blockers[:3])
+                        if len(blockers) > 3:
+                            shown += f" 等 {len(blockers)} 个文件"
+                        raise GitCommandError(
+                            f"{label}：待推送内容里有超过 100MB 的文件，GitHub 会拒绝整个推送：{shown}。"
+                            "请把这些文件移出版本库（或改用 Git LFS）后重试。"
+                        )
                     self._run(
                         ["push", remote_name, f"HEAD:refs/heads/{branch}"],
                         cwd=source,
@@ -1273,9 +1284,18 @@ class GitService:
         # 远程分支还不存在时，整条 HEAD 历史都会被上传，按 HEAD 全量排查
         revision = f"{remote_head}..HEAD" if remote_head else "HEAD"
         try:
-            listing = self._run(["rev-list", "--objects", revision], cwd=source, timeout=120)
-        except GitCommandError:
-            return []
+            listing = self._run(["rev-list", "--objects", revision], cwd=source, timeout=300)
+        except GitCommandError as exc:
+            # 扫描失败绝不能静默返回 []——那样等于关掉防护，大文件会被推上去
+            # 再被服务端以"连接被重置"拒绝，定时同步永久失败且看不出原因。
+            # 主动让本次推送失败，并把真实原因讲清楚。
+            self.log(f"推送前大文件扫描失败：{exc}")
+            channel = remote.label or remote.kind
+            raise GitCommandError(
+                f"{channel}：推送前大文件扫描超时或失败，无法确认是否有超过 100MB 的文件。"
+                "仓库过大时请先在本地清理历史大文件（release/*.exe、模型文件等），"
+                "或手动执行 git rev-list --objects HEAD | git cat-file --batch-check 排查后重试。"
+            ) from exc
         # rev-list --objects 每行是「sha + 路径」，而 cat-file 的 %(rest) 会原样回显
         # 输入行里对象名之后的内容；只喂 sha 就拿不到路径，所以这里整行喂进去。
         object_lines = [line for line in listing.splitlines() if line.strip()]
@@ -1483,6 +1503,70 @@ class GitService:
         self.log(f"{label}：远程仓库不存在，已自动创建：{name}")
         return url, True
 
+    def _auto_strip_oversized_before_push(
+        self,
+        source: Path,
+        remote: RemoteConfig,
+        target_url: str,
+        branch: str,
+        blockers: list[tuple[str, int]],
+        project_name: str = "",
+    ) -> None:
+        """GitHub 渠道：推送前自动把超 100MB 的文件移出版本库，重写未推送历史后再推。
+
+        做法：reset --soft 到远程 HEAD（把所有未推送 commit 压回暂存区）→
+        大文件 git rm --cached（保留工作区文件本体）→ 写进 .gitignore →
+        重新 commit。这样大文件 blob 不会出现在待推送对象里，push 就能通过。
+        """
+        channel = remote.label or remote.kind
+        try:
+            remote_head, _detected = self._remote_head(remote, branch, target_url)
+        except GitCommandError:
+            remote_head = ""
+        if not remote_head:
+            raise GitCommandError(
+                f"{channel}：发现超过 100MB 的文件，但无法获取远程 HEAD，"
+                "不能安全地自动重写历史。请手动清理后重试。"
+            )
+        # 1. 把所有未推送 commit 压回暂存区（工作区文件不动）
+        self._run(["reset", "--soft", remote_head], cwd=source)
+        # 2. 大文件取消跟踪（只动索引，本地文件保留）
+        for rel, _size in blockers:
+            try:
+                self._run(["rm", "--cached", "--ignore-unmatch", "--", rel], cwd=source)
+            except GitCommandError:
+                pass
+        # 3. 写进 .gitignore，避免下次又被 add 进来
+        gitignore = source / ".gitignore"
+        try:
+            existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+        except OSError:
+            existing = ""
+        existing_lines = {line.strip() for line in existing.splitlines()}
+        additions = [
+            f"/{rel}" for rel, _size in blockers
+            if f"/{rel}" not in existing_lines and rel not in existing_lines
+        ]
+        if additions:
+            block = (
+                "\n\n# RepoPulse：超过 GitHub 单文件限制（100MB）已自动排除\n"
+                + "\n".join(additions)
+                + "\n"
+            )
+            try:
+                with gitignore.open("a", encoding="utf-8") as handle:
+                    handle.write(block)
+            except OSError:
+                pass
+        # 4. 重新提交（压成一个 commit，大文件已不在索引里）
+        self._run(["add", "-A"], cwd=source, timeout=180)
+        msg = f"更新项目：{project_name}" if project_name else "更新项目"
+        self._run(["commit", "-m", msg], cwd=source, timeout=60)
+        shown = "、".join(f"{path}（{size / 1048576:.1f} MB）" for path, size in blockers[:3])
+        if len(blockers) > 3:
+            shown += f" 等 {len(blockers)} 个文件"
+        self.log(f"{channel}：已自动排除 {len(blockers)} 个超过 100MB 的文件并重写未推送历史：{shown}")
+
     def _sync_remote_channel(
         self,
         source: Path,
@@ -1500,14 +1584,20 @@ class GitService:
         # 看不出原因的报错；同时把真实原因（文件超过 100MB）直接讲清楚。
         blockers = self._outgoing_oversized_blobs(source, remote, target_url, branch)
         if blockers:
-            shown = "、".join(f"{path}（{size / 1048576:.1f} MB）" for path, size in blockers[:3])
-            if len(blockers) > 3:
-                shown += f" 等 {len(blockers)} 个文件"
-            raise GitCommandError(
-                f"{label}：待推送内容里有超过 100MB 的文件，GitHub 会拒绝整个推送：{shown}。"
-                "请把这些文件移出版本库（或改用 Git LFS）后重试；"
-                "本次已跳过该渠道，不影响本地/NAS。"
-            )
+            if remote.kind == "github":
+                # GitHub 有 100MB 单文件硬限制：不报错中断，自动把大文件移出版本库、
+                # 重写未推送历史后继续推，保证同步流程不卡在大文件上。
+                self._auto_strip_oversized_before_push(
+                    source, remote, target_url, branch, blockers, project_name,
+                )
+            else:
+                shown = "、".join(f"{path}（{size / 1048576:.1f} MB）" for path, size in blockers[:3])
+                if len(blockers) > 3:
+                    shown += f" 等 {len(blockers)} 个文件"
+                raise GitCommandError(
+                    f"{label}：待推送内容里有超过 100MB 的文件：{shown}。"
+                    "请把这些文件移出版本库（或改用 Git LFS）后重试。"
+                )
         self._run(
             ["push", target_url, f"HEAD:refs/heads/{branch}"],
             cwd=source,
