@@ -42,6 +42,16 @@ _FULL_EXCLUDE_FILES = [
     "Thumbs.db", ".DS_Store", "*.swp",
 ]
 
+# Git 托管平台的单文件硬限制：GitHub 拒绝任何超过 100MB 的文件进入版本库。
+# 必须在提交前就拦住，否则 push 会先上传几百 MB 才被服务端拒绝，表现出来是
+# “RPC failed / 连接被重置”，定时同步会一直失败且看不出真实原因。
+_GIT_HOST_FILE_LIMIT = 100 * 1024 * 1024  # 100 MB
+
+# 全量储存镜像的单文件上限。None = 不限制，素材大文件照常进备份（默认行为）。
+# 想让本地全量仓库也跳过超过 100MB 的文件（例如 release 下的安装包），
+# 把它改成 _GIT_HOST_FILE_LIMIT 即可。
+_FULL_MIRROR_MAX_BYTES: int | None = None
+
 # 新项目首次提交时自动生成的 .gitignore（避免把 .venv/node_modules 等临时目录纳入版本库）
 _DEFAULT_GITIGNORE = """\
 # RepoPulse 自动生成
@@ -91,6 +101,15 @@ class GitService:
         self.progress = progress or (lambda _task, _current, _total, _detail: None)
         self.git = shutil.which("git") or "git"
 
+    @staticmethod
+    def _base_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        """构造 Git 子进程环境，统一禁用交互式账号提示。"""
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        if extra_env:
+            env.update(extra_env)
+        return env
+
     def _run(
         self,
         args: list[str],
@@ -103,11 +122,8 @@ class GitService:
         """执行 Git 命令，可选捕获进度输出"""
         if capture_progress and progress_task:
             return self._run_with_progress(args, cwd, timeout, extra_env, progress_task)
-        
-        env = os.environ.copy()
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        if extra_env:
-            env.update(extra_env)
+
+        env = self._base_env(extra_env)
         command = [self.git, *args]
         try:
             result = subprocess.run(
@@ -163,10 +179,7 @@ class GitService:
         stdout、stderr 各用一个独立线程读取，既避免管道写满阻塞，也不和
         communicate() 抢同一根管道；进度只从 stderr 解析，失败时保留完整 stderr。
         """
-        env = os.environ.copy()
-        env["GIT_TERMINAL_PROMPT"] = "0"
-        if extra_env:
-            env.update(extra_env)
+        env = self._base_env(extra_env)
         command = [self.git, *args]
         process = subprocess.Popen(
             command,
@@ -1080,9 +1093,18 @@ class GitService:
         if not status:
             return {"committed": False, "message": "没有待提交修改"}
         commit_message = message.strip() or f"更新项目：{project.name}"
+        # 超过 Git 平台单文件限制的文件必须先挡在版本库外，否则它们会进入提交，
+        # 之后每次 push 都要先把几百 MB 传上去再被服务端拒绝（表现为“连接被重置”），
+        # 定时同步会永久失败，而本地/NAS 渠道看起来完全正常。
+        excluded = self._exclude_oversized_files(source, project.name)
         self._run(["add", "-A"], cwd=source)
         staged = self._run(["diff", "--cached", "--name-only"], cwd=source)
         if not staged:
+            if excluded:
+                return {
+                    "committed": False,
+                    "message": f"没有可提交的文件（已排除 {len(excluded)} 个超过 100MB 的文件）",
+                }
             return {"committed": False, "message": "没有可提交的文件"}
         try:
             self._run(["config", "user.name"], cwd=source)
@@ -1099,6 +1121,199 @@ class GitService:
             "message": f"已提交 {len(staged.splitlines())} 个文件：{commit_message}",
             "head": head,
         }
+
+    def _tracked_files(self, source: Path) -> set[str]:
+        """返回仓库当前已跟踪的文件（仓库相对路径）。"""
+        try:
+            output = self._run(["ls-files", "-z"], cwd=source)
+        except GitCommandError:
+            return set()
+        return {item for item in output.split("\0") if item}
+
+    def _pending_files(self, source: Path) -> list[str]:
+        """列出下一次 `git add -A` 会纳入的文件（已排除 .gitignore 命中的路径）。
+
+        已跟踪文件即使命中 .gitignore 也仍会被 add，所以这里把“已跟踪且有改动”
+        单独取一份，避免只靠 ls-files --others 漏掉它们。
+        """
+        names: set[str] = set()
+        for args in (
+            ["ls-files", "--others", "--exclude-standard", "-z"],
+            ["diff", "--name-only", "-z"],
+            ["diff", "--cached", "--name-only", "-z"],
+        ):
+            try:
+                output = self._run(args, cwd=source)
+            except GitCommandError:
+                continue
+            names.update(item for item in output.split("\0") if item)
+        return sorted(names)
+
+    def scan_oversized_files(
+        self, source: Path, limit: int = _GIT_HOST_FILE_LIMIT
+    ) -> list[tuple[str, int]]:
+        """扫描即将被提交、且超过 limit 的文件，返回 [(相对路径, 字节数)]（按体积降序）。"""
+        oversized: list[tuple[str, int]] = []
+        for rel in self._pending_files(source):
+            try:
+                path = source / rel
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > limit:
+                oversized.append((rel, size))
+        oversized.sort(key=lambda item: item[1], reverse=True)
+        return oversized
+
+    def scan_tracked_oversized_files(
+        self, source: Path, limit: int = _GIT_HOST_FILE_LIMIT
+    ) -> list[tuple[str, int]]:
+        """扫描已经被 Git 跟踪、且超过 limit 的文件。
+
+        这些文件是历史遗留：.gitignore 对已跟踪文件无效，不取消跟踪的话它们会
+        一直留在提交里，push 永远被服务端拒绝（keyframe 的 333MB 安装包就是这种）。
+        """
+        oversized: list[tuple[str, int]] = []
+        for rel in self._tracked_files(source):
+            try:
+                path = source / rel
+                if not path.is_file():
+                    continue
+                size = path.stat().st_size
+            except OSError:
+                continue
+            if size > limit:
+                oversized.append((rel, size))
+        oversized.sort(key=lambda item: item[1], reverse=True)
+        return oversized
+
+    def _exclude_oversized_files(self, source: Path, project_name: str = "") -> list[tuple[str, int]]:
+        """把超过平台限制的文件挡在版本库外，返回被排除的 [(相对路径, 字节数)]。
+
+        两类都要处理：
+        - 准备提交的新文件/改动文件：写进 .gitignore 即可挡住；
+        - 历史遗留的已跟踪大文件：.gitignore 对它们无效，必须 `git rm --cached`
+          取消跟踪，否则会一直留在提交里让 push 永远失败。
+        这里只动索引，工作区文件本体一律保留。
+        """
+        merged: dict[str, int] = {}
+        for rel, size in self.scan_oversized_files(source):
+            merged[rel] = max(merged.get(rel, 0), size)
+        # 已跟踪的大文件即使本次没有改动，也要取消跟踪；keyframe 的 333MB
+        # 安装包就属于这种，光靠 .gitignore 是拦不住的。
+        for rel, size in self.scan_tracked_oversized_files(source):
+            merged[rel] = max(merged.get(rel, 0), size)
+        if not merged:
+            return []
+        oversized = sorted(merged.items(), key=lambda item: item[1], reverse=True)
+
+        rels = [rel for rel, _size in oversized]
+        gitignore = source / ".gitignore"
+        try:
+            existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+        except OSError:
+            existing = ""
+        existing_lines = {line.strip() for line in existing.splitlines()}
+        additions = [
+            f"/{rel}" for rel in rels
+            if f"/{rel}" not in existing_lines and rel not in existing_lines
+        ]
+        if additions:
+            block = (
+                "\n\n# RepoPulse：超过 Git 平台单文件限制（100MB）已自动排除\n"
+                + "\n".join(additions)
+                + "\n"
+            )
+            try:
+                with gitignore.open("a", encoding="utf-8") as handle:
+                    handle.write(block)
+            except OSError:
+                pass
+
+        tracked = self._tracked_files(source)
+        already_tracked = [rel for rel in rels if rel in tracked]
+        for rel in already_tracked:
+            try:
+                # 只从索引移除，保留工作区文件，避免用户以为文件被删了
+                self._run(["rm", "--cached", "--ignore-unmatch", "--", rel], cwd=source)
+            except GitCommandError:
+                pass
+
+        label = f"{project_name}：" if project_name else ""
+        shown = "、".join(f"{rel}（{size / 1048576:.1f} MB）" for rel, size in oversized[:3])
+        if len(oversized) > 3:
+            shown += f" 等 {len(oversized)} 个文件"
+        self.log(f"{label}已自动排除 {len(oversized)} 个超过 100MB 的文件：{shown}")
+        if already_tracked:
+            self.log(
+                f"{label}其中 {len(already_tracked)} 个原本已被跟踪，已取消跟踪"
+                "（本地文件保留；历史提交里的旧副本仍在，需重写历史才能瘦身）"
+            )
+        return oversized
+
+    def _outgoing_oversized_blobs(
+        self,
+        source: Path,
+        remote: RemoteConfig,
+        url: str,
+        branch: str,
+        limit: int = _GIT_HOST_FILE_LIMIT,
+    ) -> list[tuple[str, int]]:
+        """预演本次 push 会携带哪些 blob，找出超过 limit 的文件。
+
+        `git push --dry-run` 不发送对象，服务端因此无法提前拒绝；这里在本地先把
+        即将上传的对象过一遍，避免传了几百 MB 之后才收到“连接被重置”这种报错。
+        """
+        try:
+            remote_head, _detected = self._remote_head(remote, branch, url)
+        except GitCommandError:
+            remote_head = ""
+        # 远程分支还不存在时，整条 HEAD 历史都会被上传，按 HEAD 全量排查
+        revision = f"{remote_head}..HEAD" if remote_head else "HEAD"
+        try:
+            listing = self._run(["rev-list", "--objects", revision], cwd=source, timeout=120)
+        except GitCommandError:
+            return []
+        # rev-list --objects 每行是「sha + 路径」，而 cat-file 的 %(rest) 会原样回显
+        # 输入行里对象名之后的内容；只喂 sha 就拿不到路径，所以这里整行喂进去。
+        object_lines = [line for line in listing.splitlines() if line.strip()]
+        if not object_lines:
+            return []
+
+        try:
+            result = subprocess.run(
+                [self.git, "cat-file", "--batch-check=%(objecttype) %(objectsize) %(rest)"],
+                cwd=str(source),
+                input="\n".join(object_lines) + "\n",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+                env=self._base_env(),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+
+        largest: dict[str, int] = {}
+        for line in result.stdout.splitlines():
+            parts = line.split(" ", 2)
+            if len(parts) < 2 or parts[0] != "blob":
+                continue
+            try:
+                size = int(parts[1])
+            except ValueError:
+                continue
+            if size > limit:
+                # %(rest) 会把输入行里对象名之后的内容原样带回，含前导空格
+                path = parts[2].strip() if len(parts) > 2 else ""
+                if not path:
+                    path = "(未知路径)"
+                largest[path] = max(largest.get(path, 0), size)
+        return sorted(largest.items(), key=lambda item: item[1], reverse=True)
 
     def _estimate_tree_size(self, root: Path) -> int:
         """统计目录下未被全量镜像排除规则忽略的文件总字节数；读取失败返回 0。"""
@@ -1151,6 +1366,14 @@ class GitService:
             "/XD", *_FULL_EXCLUDE_DIRS,
             "/XF", *_FULL_EXCLUDE_FILES,
         ]
+        # 默认不限制单文件体积，素材大文件照常进备份（与设置项文案一致）。
+        # 想让全量仓库也跳过超过 100MB 的文件，把 _FULL_MIRROR_MAX_BYTES 改掉即可。
+        if _FULL_MIRROR_MAX_BYTES:
+            cmd.append(f"/MAX:{int(_FULL_MIRROR_MAX_BYTES)}")
+            self.log(
+                f"全量备份：单文件上限 {_FULL_MIRROR_MAX_BYTES / 1048576:.0f} MB，"
+                "更大的文件将被跳过"
+            )
         try:
             result = subprocess.run(
                 cmd,
@@ -1273,6 +1496,18 @@ class GitService:
         if not target_url:
             return {"ok": False, "message": f"{label}：未配置仓库地址"}
         self.log(f"同步 {label}：{self._mask_url(target_url)}")
+        # 先判断本次会推送哪些对象，避免上传几百 MB 后才拿到“连接被重置”这种
+        # 看不出原因的报错；同时把真实原因（文件超过 100MB）直接讲清楚。
+        blockers = self._outgoing_oversized_blobs(source, remote, target_url, branch)
+        if blockers:
+            shown = "、".join(f"{path}（{size / 1048576:.1f} MB）" for path, size in blockers[:3])
+            if len(blockers) > 3:
+                shown += f" 等 {len(blockers)} 个文件"
+            raise GitCommandError(
+                f"{label}：待推送内容里有超过 100MB 的文件，GitHub 会拒绝整个推送：{shown}。"
+                "请把这些文件移出版本库（或改用 Git LFS）后重试；"
+                "本次已跳过该渠道，不影响本地/NAS。"
+            )
         self._run(
             ["push", target_url, f"HEAD:refs/heads/{branch}"],
             cwd=source,

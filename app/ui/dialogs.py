@@ -1046,10 +1046,17 @@ class SettingsDialog(QDialog):
         settings = QSettings("RepoPulse", "RepoPulse")
         self.full_sync_check = JellyCheckBox("本地 Git 全量同步（连素材大文件一起存）")
         self.full_sync_check.setChecked(settings.value("sync_full_files", False, type=bool))
-        self.full_sync_check.setToolTip("开启后，本地全量仓库会镜像整个工作区，代码和素材大文件一起存储；其他 Git 远程仍只推代码")
+        self.full_sync_check.setToolTip(
+            "开启后，本地全量仓库会镜像整个工作区，代码和素材大文件一起存储；\n"
+            "其他 Git 远程仍只推代码：超过 100MB 的文件不会被提交（GitHub 会拒收），\n"
+            "提交时会自动写入 .gitignore 并在日志里说明。"
+        )
         self.ignore_github_check = JellyCheckBox("GitHub 连接失败自动忽略")
         self.ignore_github_check.setChecked(settings.value("ignore_github_failure", False, type=bool))
-        self.ignore_github_check.setToolTip("GitHub 不可用时显示“未代理”，不影响其他渠道状态")
+        self.ignore_github_check.setToolTip(
+            "GitHub 不可用时该渠道状态标为“已忽略”，不影响其他渠道；\n"
+            "卡片上仍会显示失败的真实原因，方便区分是代理、鉴权还是超大文件。"
+        )
 
         self.scheduled_check = JellyCheckBox("开启定时同步")
         self.scheduled_check.setChecked(settings.value("scheduled_sync_enabled", False, type=bool))

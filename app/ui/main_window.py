@@ -1788,6 +1788,14 @@ class MainWindow(QMainWindow):
         if not data:
             return "waiting", "等待检查"
         if data.get("ignored") and remote.kind == "github":
+            # “未代理”只是忽略开关的显示口径。原先无论什么错误都显示成
+            # “GitHub 未代理”，会让用户以为代理没开，实际可能是超大文件、
+            # 鉴权失败或超时；这里把真实原因带出来，避免继续误导。
+            reason = " ".join(str(data.get("error") or "").split())
+            if reason:
+                if len(reason) > 120:
+                    reason = reason[:117] + "..."
+                return "warning", f"GitHub 已忽略：{reason}"
             return "waiting", "GitHub 未代理，已忽略"
         # 远程仓库尚不存在（如 404）时，提示同步会自动创建
         if data.get("not_created") or data.get("uncreated") or data.get("relation") == "待创建":
