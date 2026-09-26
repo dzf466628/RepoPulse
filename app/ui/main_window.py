@@ -380,6 +380,18 @@ class StatusCard(QFrame):
         text_label = QLabel(status)
         text_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         text_label.setStyleSheet(f"color: {status_color}; font-size: 11px; font-weight: 700; background: transparent;")
+        # 徽章必须保持窄。QLabel 默认既不换行也不省略，长状态文本会把这一行的
+        # 最小宽度顶大，而卡片宽度是 Expanding，最终把整个窗口的最小宽度撑开。
+        # 样式表设好后 widget.fontMetrics() 就是 11px 粗体（实测与显式 QFont 一致），
+        # 按像素预算做省略号截断，再用 maximumWidth 兜底；完整文本退到卡片 tooltip。
+        badge_metrics = text_label.fontMetrics()
+        elided_status = badge_metrics.elidedText(status, Qt.TextElideMode.ElideRight, 116)
+        text_label.setText(elided_status)
+        text_label.setMinimumWidth(0)
+        text_label.setMaximumWidth(116)
+        text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        if elided_status != status:
+            self.setToolTip(status)
         badge_layout.addWidget(self.status_ring)
         badge_layout.addWidget(text_label)
         title_label.setMinimumWidth(60)
@@ -1788,15 +1800,11 @@ class MainWindow(QMainWindow):
         if not data:
             return "waiting", "等待检查"
         if data.get("ignored") and remote.kind == "github":
-            # “未代理”只是忽略开关的显示口径。原先无论什么错误都显示成
-            # “GitHub 未代理”，会让用户以为代理没开，实际可能是超大文件、
-            # 鉴权失败或超时；这里把真实原因带出来，避免继续误导。
-            reason = " ".join(str(data.get("error") or "").split())
-            if reason:
-                if len(reason) > 120:
-                    reason = reason[:117] + "..."
-                return "warning", f"GitHub 已忽略：{reason}"
-            return "waiting", "GitHub 未代理，已忽略"
+            # 角标只有一颗小徽章那么宽，绝不能放长文本（会把卡片和窗口顶开）。
+            # 这里只给短状态；真实的忽略原因交给 _remote_reason() 走 tooltip。
+            # 也不再用“未代理”这个旧口径——实际原因可能是超大文件、鉴权失败
+            # 或超时，写成“未代理”会让人以为代理没开。
+            return "warning", "GitHub 已忽略"
         # 远程仓库尚不存在（如 404）时，提示同步会自动创建
         if data.get("not_created") or data.get("uncreated") or data.get("relation") == "待创建":
             return "waiting", "待创建"
@@ -1817,6 +1825,16 @@ class MainWindow(QMainWindow):
         if relation == "待首次同步":
             return "waiting", "待首次同步"
         return "different", relation
+
+    def _remote_reason(self, remote, data) -> str:
+        """GitHub 被忽略时的真实原因；只用于 tooltip，不参与布局。
+
+        与 _remote_state_key 分工：角标要短（否则顶开卡片和窗口），
+        tooltip 可以长（鼠标悬停才出现，零布局影响）。
+        """
+        if not data or not data.get("ignored") or remote.kind != "github":
+            return ""
+        return " ".join(str(data.get("error") or "").split())
 
     def _update_floating_widget(self) -> None:
         fw = getattr(self, "floating", None)
@@ -1842,6 +1860,11 @@ class MainWindow(QMainWindow):
                 continue
             data = remotes_data.get(key)
             rk, tip = self._remote_state_key(remote, data)
+            # 悬浮窗这里是 ring 的 tooltip（悬停才显示），不是可见文本，
+            # 所以可以带上真实原因；仍然限长，避免 tooltip 糊一屏。
+            reason = self._remote_reason(remote, data)
+            if reason:
+                tip = f"{tip} · {reason[:80]}"
             fw.set_channel_state(key, rk, STATE_COLORS.get(rk, STATE_COLORS["waiting"]),
                                  f"{remote.label or key}：{tip}")
         busy = self.worker is not None and self.worker.isRunning()
