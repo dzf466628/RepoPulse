@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
     QStyleOptionViewItem,
 )
 
-from app import __version__
+from app import __version__, telemetry
 from app.core.git_service import GitService
 from app.core.updater import UPDATE_URL, UpdateCheckThread
 from app.models import ProjectConfig, RemoteConfig
@@ -953,6 +953,7 @@ class MainWindow(QMainWindow):
         if self.auto_sync_queue or (self.sync_worker and self.sync_worker.isRunning()):
             self._show_tray_message("提交并同步进行中", "当前已有同步任务正在处理。", QSystemTrayIcon.MessageIcon.Information)
             return
+        telemetry.track("托盘提交并同步")
         self._tray_sync_requested = True
         self._queue_automatic_sync(enabled_projects, "托盘同步")
 
@@ -1533,6 +1534,7 @@ class MainWindow(QMainWindow):
         project = next((value for value in self.projects if value.project_id == project_id), None)
         if not project:
             return
+        telemetry.track("查看项目详情")
         detail = ProjectDetailDialog(project, self._project_stats(project), self._project_icon(project), self)
         detail.sync_requested.connect(lambda: self._sync_from_project_detail(detail))
         detail.delete_requested.connect(lambda: self._delete_from_project_detail(detail, project))
@@ -1683,6 +1685,7 @@ class MainWindow(QMainWindow):
             self._append_log("当前任务进行中，暂时不能切换项目开关。")
             return
         project = self.projects[row]
+        telemetry.track("项目开关")
         project.sync_enabled = not project.sync_enabled
         self.store.save(self.projects)
         if not project.sync_enabled:
@@ -2607,6 +2610,7 @@ class MainWindow(QMainWindow):
             return
         
         # 优先使用缓存的本地状态，避免在主线程阻塞调用 Git 命令
+        telemetry.track("提交并同步")
         result = self.results.get(project.project_id, {})
         local = result.get("local", {})
         
@@ -2693,6 +2697,7 @@ class MainWindow(QMainWindow):
         if self.sync_worker and self.sync_worker.isRunning():
             self._append_log("同步进行中，请稍后再拉取。")
             return
+        telemetry.track("拉取更新")
         self._auto_sync_delay_timer.stop()
         self._set_busy(True)
         self._set_floating_task("拉取中…")
@@ -2849,6 +2854,7 @@ class MainWindow(QMainWindow):
             return
         from app.ui.dialogs import ProjectDialog
         dialog = ProjectDialog(self)
+        telemetry.track("新建项目")
         dialog.setWindowTitle("新建项目")
         if not dialog.exec():
             return
@@ -3004,6 +3010,7 @@ class MainWindow(QMainWindow):
         if self._update_thread is not None and self._update_thread.isRunning():
             QMessageBox.information(self, "检查更新", "正在检查，请稍候 ...")
             return
+        telemetry.track("检查更新")
         self._start_update_check(silent=False)
 
     def _start_update_check(self, silent: bool) -> None:
@@ -3052,6 +3059,7 @@ class MainWindow(QMainWindow):
             self._download_and_install_update(result["version"], result["url"])
 
     def _download_and_install_update(self, version: str, url: str) -> None:
+        telemetry.track("下载更新")
         dlg = UpdateDownloadDialog(version, url, self)
         dlg.download_ok.connect(self._launch_installer)
         dlg.exec()
@@ -3114,6 +3122,7 @@ class MainWindow(QMainWindow):
         )
 
     def open_settings(self) -> None:
+        telemetry.track("打开设置")
         dialog = SettingsDialog(self)
         dialog.add_git_requested.connect(lambda git_dialog: self._submit_settings_git(dialog, git_dialog))
         dialog.settings_changed.connect(self._apply_sync_settings)
@@ -3150,6 +3159,7 @@ class MainWindow(QMainWindow):
         self.auto_sync_timer.start(max(1000, interval_ms))
 
     def _run_scheduled_sync(self) -> None:
+        telemetry.track("定时同步")
         self._queue_automatic_sync(self.projects, "定时同步")
 
     def _queue_automatic_sync(self, projects: list[ProjectConfig], reason: str) -> None:
@@ -3200,6 +3210,7 @@ class MainWindow(QMainWindow):
             fw.set_task(text)
 
     def refresh_all(self) -> None:
+        telemetry.track("刷新全部")
         self._set_floating_task("检查中…")
         self._start_refresh([project for project in self.projects if project.sync_enabled])
 
@@ -3209,6 +3220,7 @@ class MainWindow(QMainWindow):
             return
         if project.sync_enabled:
             self._start_refresh([project], show_dialog=show_dialog)
+            telemetry.track("刷新选中")
         else:
             # 未开启同步的项目只轻量刷新本地暂存区状态（如刚创建完仓库）
             self._refresh_local_status(project)
@@ -3296,6 +3308,7 @@ class MainWindow(QMainWindow):
             dialog = GitDialog(self, project=None)
             if not dialog.exec():
                 return
+        telemetry.track("添加Git渠道")
         remote = dialog.build_remote()
         discovered = dialog.get_discovered_repositories()
         if remote.kind == "local" and not remote.path:
@@ -3368,6 +3381,7 @@ class MainWindow(QMainWindow):
     def open_local(self) -> None:
         project = self._current_project()
         if project and Path(project.workspace_path).exists():
+            telemetry.track("打开本地目录")
             os.startfile(project.workspace_path)
 
     def open_github(self) -> None:
@@ -3375,11 +3389,13 @@ class MainWindow(QMainWindow):
         if project:
             url = next((remote.url for remote in project.remotes.values() if remote.kind == "github" and remote.url), "")
             if url:
+                telemetry.track("打开GitHub")
                 webbrowser.open(url)
 
     def open_terminal(self) -> None:
         project = self._current_project()
         if project and Path(project.workspace_path).exists():
+            telemetry.track("打开终端")
             os.startfile("cmd.exe", "open", f'/K cd /d "{project.workspace_path}"')
 
 

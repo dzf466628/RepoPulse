@@ -86,6 +86,7 @@ def _kill_stale_instance(pid_path: Path) -> None:
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
+from app import telemetry
 from app.ui.main_window import MainWindow
 from app.ui.theme import apply_theme
 
@@ -104,12 +105,17 @@ def main() -> int:
     if icon_path.is_file():
         app.setWindowIcon(QIcon(str(icon_path)))
     apply_theme(app)
+    # 使用统计（只报计数、已脱敏、全静默；绝不影响软件运行）
+    telemetry.start()
+    telemetry.heartbeat()
+
     window = MainWindow()
     window.show()
     code = 0
     try:
         code = app.exec()
     finally:
+        telemetry.exit()      # os._exit 不跑 atexit：这一包必须显式发
         try:
             pid_path.unlink()
         except OSError:
