@@ -1,6 +1,9 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """使用统计上报（静默、非阻塞、已脱敏、只报计数）。
 
-用户口径：「不获取敏感信息，只统计计数」「不做开关」「要脱敏」「有问题静默」。
+用户口径：「不获取敏感信息，只统计计数」「可通过环境变量 HTSJ_DISABLE=1 关闭」「要脱敏」「有问题静默」。
 
 设计要点（为什么这么写）
 ------------------------
@@ -56,6 +59,7 @@ APP = __app_name__.lower()
 TIMEOUT = 5.0                     # 请求超时：慢就等于没有，绝不拖住后台线程
 HEARTBEAT_SEC = 60                # 心跳间隔（服务端以 15 分钟内有心跳判定在线）
 _SALT = "htsj-app-stats-2026"     # 固定盐：让哈希稳定（跨重装一致）又不直接暴露 MAC
+_DISABLED = os.environ.get("HTSJ_DISABLE") == "1"  # 关闭遥测：设置环境变量 HTSJ_DISABLE=1
 
 _counts: dict[str, int] = {}
 _ident: dict | None = None
@@ -232,6 +236,8 @@ def _payload(event: str, extra: dict | None = None) -> bytes:
 
 def report(event: str, extra: dict | None = None):
     """组装并发一包（后台线程，**全静默**）。返回线程对象，退出时可等它一下。"""
+    if _DISABLED:
+        return None
     def run():
         try:
             req = urllib.request.Request(
@@ -262,6 +268,8 @@ def _heartbeat_loop() -> None:
 
 def start() -> None:
     """入口处调一次：发 start，并注册退出上报。重复调用无副作用。"""
+    if _DISABLED:
+        return
     global _started
     try:
         if _started:
@@ -276,6 +284,8 @@ def start() -> None:
 
 def heartbeat() -> None:
     """入口处调一次：起心跳线程（每 60 秒一包）。重复调用无副作用。"""
+    if _DISABLED:
+        return
     global _hb_started
     try:
         if _hb_started:

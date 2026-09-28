@@ -1,0 +1,57 @@
+# 自动检测文本文件并统一行尾
+* text=auto
+
+# Python 源码强制 LF
+*.py text eol=lf
+*.pyi text eol=lf
+
+# 文档与配置
+*.md text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.cfg text eol=lf
+*.ini text eol=lf
+*.iss text eol=lf
+*.spec text eol=lf
+*.txt text eol=lf
+
+# Windows 批处理保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.bmp binary
+*.ico binary
+*.icns binary
+*.webp binary
+*.svg text
+*.exe binary
+*.dll binary
+*.lib binary
+*.so binary
+*.dylib binary
+*.pdb binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.mp4 binary
+*.avi binary
+*.mov binary
+*.mkv binary
+*.mp3 binary
+*.wav binary
+*.ogg binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary
+*.rar binary

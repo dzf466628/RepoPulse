@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """启动时自动检查更新 + 自动下载更新。
 
 服务器端零配置：把安装包（RepoPulse-Setup-vX.Y.Z.exe）直接上传到源站目录即可

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 dudu <https://duadu.cc>
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 """自动更新下载对话框：深色主题 + 实时进度 + 可取消。"""
 from __future__ import annotations
 
