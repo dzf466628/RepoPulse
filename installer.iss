@@ -1,6 +1,6 @@
 #define AppName "RepoPulse"
 #ifndef AppVersion
-#define AppVersion "1.0.2"
+#define AppVersion "1.0.16"
 #endif
 #define AppPublisher "RepoPulse"
 #define AppExeName "RepoPulse.exe"

@@ -850,7 +850,7 @@ class MainWindow(QMainWindow):
         self._build_floating_widget()
         self._update_thread: UpdateCheckThread | None = None
         self._update_check_started = False
-        QTimer.singleShot(250, self.refresh_all)
+        QTimer.singleShot(250, lambda: self.refresh_all(track_usage=False))
         QTimer.singleShot(2500, self._check_update_auto)
 
     def showEvent(self, event):  # noqa: N802 - Qt API
@@ -986,26 +986,26 @@ class MainWindow(QMainWindow):
     def _stop_background_threads(self) -> None:
         self.auto_sync_delay_timer.stop()
         self.auto_sync_timer.stop()
-        for thread in (getattr(self, "worker", None), getattr(self, "sync_worker", None), getattr(self, "create_worker", None), getattr(self, "pull_worker", None)):
+        # 所有可能在跑的后台 QThread。这些 worker 都是重写 run() 做阻塞活，
+        # 没有 exec() 事件循环，quit() 是空操作；先 quit 留作未来兼容，
+        # 等 1 秒不退就 terminate 强杀。
+        thread_attrs = (
+            "worker", "sync_worker", "create_worker", "pull_worker",
+            "delete_worker", "local_status_worker",
+            "_repos_worker", "_clone_worker", "_migrate_worker", "_complete_worker",
+            "_update_thread",
+        )
+        for attr in thread_attrs:
+            thread = getattr(self, attr, None)
             if thread is None:
                 continue
             try:
                 if thread.isRunning():
                     thread.quit()
-                    thread.wait(2000)
+                    thread.wait(1000)
                 if thread.isRunning():
                     thread.terminate()
                     thread.wait(2000)
-            except RuntimeError:
-                pass
-        update_thread = getattr(self, "_update_thread", None)
-        if update_thread is not None:
-            try:
-                if update_thread.isRunning():
-                    update_thread.wait(2000)
-                if update_thread.isRunning():
-                    update_thread.terminate()
-                    update_thread.wait(2000)
             except RuntimeError:
                 pass
 
@@ -1062,6 +1062,8 @@ class MainWindow(QMainWindow):
             if self.tray_icon:
                 self.tray_icon.hide()
             event.accept()
+            # setQuitOnLastWindowClosed(False)：窗口关了事件循环不会自己退，必须显式 quit
+            QApplication.quit()
             return
         # 浮动窗脱离主窗口时，点 X 只隐藏主窗口，悬浮窗继续显示
         if hasattr(self, "floating") and not self.floating.docked and not self._force_quit:
@@ -1093,9 +1095,16 @@ class MainWindow(QMainWindow):
             self.hide()
             event.ignore()
             return
+        # 用户选了"关闭软件"：停后台线程、关悬浮窗、藏托盘、允许关闭、退事件循环。
+        # 之前只 event.accept() 但没调 QApplication.quit()，配合
+        # setQuitOnLastWindowClosed(False) 会导致窗口销毁后进程常驻。
         self._stop_background_threads()
+        self._close_floating()
+        if self.tray_icon:
+            self.tray_icon.hide()
         self._allow_close = True
         event.accept()
+        QApplication.quit()
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -1254,7 +1263,7 @@ class MainWindow(QMainWindow):
         refresh_button.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         refresh_button.setToolTip("刷新全部项目和 Git 渠道状态")
-        refresh_button.clicked.connect(self.refresh_all)
+        refresh_button.clicked.connect(lambda _checked=False: self.refresh_all())
         self.pull_button = QPushButton("拉取到本地")
         self.pull_button.setObjectName("quickAction")
         self.pull_button.setFixedHeight(30)
@@ -1900,6 +1909,7 @@ class MainWindow(QMainWindow):
         card = self.card_widgets.get(key)
         if not project or not remote or not card:
             return
+        telemetry.track("重命名Git渠道")
         remote.label = name
         self.store.save(self.projects)
         self.results.pop(project.project_id, None)
@@ -2232,6 +2242,9 @@ class MainWindow(QMainWindow):
     def _delete_remote_repo(self, row: dict, remote, detail) -> None:
         """远程真实列表行：确认后删除该渠道工程并刷新列表。"""
         name = str(row.get("name") or "")
+        if not name:
+            return
+        telemetry.track("删除远程仓库")
         try:
             self._append_log(self._delete_channel_repo_files(remote, name))
         except Exception as exc:
@@ -2243,6 +2256,8 @@ class MainWindow(QMainWindow):
     def _pull_remote_repo(self, row: dict, remote) -> None:
         """详情框里点"拉取"：已落地的项目走快进更新；未落地的选目录 clone。"""
         from app.workers import CloneRepoWorker
+
+        telemetry.track("拉取远程仓库")
 
         # 已拉取：找本地项目，直接后台快进（不覆盖本地提交）
         if row.get("pulled") and row.get("project_id"):
@@ -2437,6 +2452,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "迁移", f"目标已存在同名目录：{new_path}")
             return
 
+        telemetry.track("迁移项目")
+
         src = Path(project.workspace_path)
         same_drive = src.anchor == new_path.anchor
 
@@ -2527,6 +2544,7 @@ class MainWindow(QMainWindow):
         name = (name or "").strip()
         if not ok or not name:
             return
+        telemetry.track("重命名项目")
         project.name = name
         self.store.save(self.projects)
         dialog.accept()
@@ -2559,6 +2577,7 @@ class MainWindow(QMainWindow):
         if not project:
             return
         if card_key == "__staging__":
+            telemetry.track("删除项目")
             self.projects = [item for item in self.projects if item.project_id != project_id]
             self.results.pop(project_id, None)
             self.store.save(self.projects)
@@ -2569,6 +2588,7 @@ class MainWindow(QMainWindow):
         remote = project.remotes.get(card_key) or self.remotes.get(card_key)
         if remote is None:
             return
+        telemetry.track("删除项目仓库")
         try:
             self._append_log(self._delete_channel_repo_files(remote, project.name, project))
         except Exception as exc:
@@ -2591,6 +2611,7 @@ class MainWindow(QMainWindow):
             confirm_text="移除卡片",
         ):
             return
+        telemetry.track("移除Git渠道")
         self.remotes.pop(key, None)
         self.card_order = [item for item in self.card_order if item != key]
         self.store.global_remotes = self.remotes
@@ -2614,6 +2635,7 @@ class MainWindow(QMainWindow):
     def _open_repository_target(self, target: str) -> None:
         if not target:
             return
+        telemetry.track("打开仓库")
         path = Path(target).expanduser()
         if path.is_dir():
             os.startfile(str(path))
@@ -3240,18 +3262,20 @@ class MainWindow(QMainWindow):
         if fw is not None:
             fw.set_task(text)
 
-    def refresh_all(self) -> None:
-        telemetry.track("刷新全部")
+    def refresh_all(self, *, track_usage: bool = True) -> None:
+        if track_usage:
+            telemetry.track("刷新全部")
         self._set_floating_task("检查中…")
         self._start_refresh([project for project in self.projects if project.sync_enabled])
 
-    def refresh_selected(self, show_dialog: bool = True) -> None:
+    def refresh_selected(self, show_dialog: bool = True, *, track_usage: bool = False) -> None:
         project = self._current_project()
         if not project:
             return
         if project.sync_enabled:
             self._start_refresh([project], show_dialog=show_dialog)
-            telemetry.track("刷新选中")
+            if track_usage:
+                telemetry.track("刷新选中")
         else:
             # 未开启同步的项目只轻量刷新本地暂存区状态（如刚创建完仓库）
             self._refresh_local_status(project)
@@ -3378,7 +3402,7 @@ class MainWindow(QMainWindow):
         self._reload_project_list(select_id=first_project_id or None)
         self._render_cards(None)
         self._append_log(f"已添加全局 Git 渠道：{remote.label}")
-        self.refresh_all()
+        self.refresh_all(track_usage=False)
 
     def _choose_host_repository(self, repositories: list[dict]) -> dict | None:
         if len(repositories) == 1:
