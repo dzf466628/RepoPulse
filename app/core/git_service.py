@@ -1427,13 +1427,41 @@ class GitService:
         target = self.local_channel_path(remote, project) if remote.path else None
         if target is None or not str(target):
             return {"ok": False, "message": f"{label}：未配置本地路径"}
+
+        # Local Git is a mirror of the source workspace, so its branch must
+        # follow the source repository's current HEAD instead of trusting the
+        # project-level default_branch. Existing projects can legitimately use
+        # master, main, or another branch, and a stale configured name would
+        # make `git fetch <source> <branch>` fail even though the source repo is
+        # healthy. For a detached source HEAD, fetch HEAD and keep the configured
+        # name only as the local branch label.
+        source_branch = ""
+        try:
+            source_branch = self._run(
+                ["symbolic-ref", "--short", "-q", "HEAD"],
+                cwd=source,
+            )
+        except GitCommandError:
+            source_branch = ""
+        source_ref = source_branch or "HEAD"
+        target_branch = source_branch or branch or "main"
+        if source_branch and branch and source_branch != branch:
+            self.log(f"{label}：忽略配置分支 {branch}，按源仓库当前分支 {source_branch} 同步")
+
         if target.resolve() == source.resolve():
             return {"ok": True, "message": f"{label}：与开发目录相同，已跳过"}
         target.mkdir(parents=True, exist_ok=True)
+        target_has_head = True
         try:
             self._run(["rev-parse", "--show-toplevel"], cwd=target)
         except GitCommandError:
-            self._run(["init", "-q", "-b", branch], cwd=target)
+            self._run(["init", "-q", "-b", target_branch], cwd=target)
+            target_has_head = False
+        else:
+            try:
+                self._run(["rev-parse", "--verify", "HEAD"], cwd=target)
+            except GitCommandError:
+                target_has_head = False
         target_status = self._run(["status", "--porcelain"], cwd=target)
         tracked_dirty = [
             line for line in target_status.splitlines()
@@ -1446,16 +1474,30 @@ class GitService:
         if target_status:
             self.log(f"{label}：保留目标目录中的未跟踪文件，继续同步")
         self.log(f"同步 {label}：{target}")
-        self._run(["fetch", "--quiet", str(source), branch], cwd=target, timeout=45)
+        self._run(["fetch", "--quiet", str(source), source_ref], cwd=target, timeout=45)
         if full_sync:
             # 全量储存：强制把已跟踪代码对齐到 source 最新提交（丢弃备份仓库自己的
             # 脏改动，未跟踪的素材文件不受影响），再把整个工作区（代码 + 素材大文件，
             # 排除临时/可再生成文件）镜像过来。target 自身的 .git 不参与镜像，保持不动。
-            self._run(["reset", "--hard", "FETCH_HEAD"], cwd=target, timeout=45)
+            if target_has_head:
+                self._run(["reset", "--hard", "FETCH_HEAD"], cwd=target, timeout=45)
+            else:
+                # A deleted/recreated mirror may still contain copied files while
+                # its .git has no HEAD. Force the first checkout to replace those
+                # untracked paths with the source snapshot.
+                self._run(
+                    ["checkout", "-B", target_branch, "--force", "FETCH_HEAD"],
+                    cwd=target,
+                    timeout=45,
+                )
             self._mirror_workspace_full(source, target)
             self.log(f"{label}：已全量镜像工作区（含素材大文件）")
         else:
-            self._run(["checkout", "-B", branch, "FETCH_HEAD"], cwd=target, timeout=45)
+            checkout_args = ["checkout", "-B", target_branch]
+            if not target_has_head:
+                checkout_args.append("--force")
+            checkout_args.append("FETCH_HEAD")
+            self._run(checkout_args, cwd=target, timeout=45)
         return {"ok": True, "message": f"{label}：同步完成"}
 
     def _ensure_host_repository(
