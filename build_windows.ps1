@@ -43,6 +43,18 @@ if (-not $iscc) {
     throw "Inno Setup 6 ISCC.exe was not found. Install Inno Setup 6 first."
 }
 
+# 内置 Git（MinGit）：没就位就先取一份；取不到直接中止，
+# 否则会做出一个用户装完点"新建项目"就报 WinError 2 的安装包。
+$vendorGit = Join-Path $projectRoot "vendor\git\cmd\git.exe"
+if (-not (Test-Path $vendorGit)) {
+    Write-Host "[0/3] Bundled Git missing, fetching via tools\fetch_minigit.ps1 ..."
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $projectRoot "tools\fetch_minigit.ps1")
+    if (-not (Test-Path $vendorGit)) {
+        throw "Bundled Git is missing (vendor\git). Run tools\fetch_minigit.ps1 first, then build again."
+    }
+}
+Write-Host "[0/3] Bundled Git ready: $vendorGit"
+
 Write-Host "[1/3] Build PyInstaller onedir directory (v$version) ..."
 # PyInstaller/ISCC 把进度日志写到 stderr；合并到 stdout 并临时放宽策略，
 # 避免 $ErrorActionPreference="Stop" 把日志误判成 NativeCommandError（假失败）。

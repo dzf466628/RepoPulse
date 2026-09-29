@@ -14,12 +14,20 @@ qt_runtime_names = (
 qt_binaries = [(str(qt_bin / name), 'PyQt6') for name in qt_runtime_names if (qt_bin / name).is_file()]
 excluded_external_binaries = {'icuuc.dll', 'icudt78.dll'}
 
+# 内置 Git（MinGit）：vendor\git 不进库，由 tools\fetch_minigit.ps1 获取。
+# 没有它就别打包 —— 否则会做出一个用户装完点"新建项目"就报 WinError 2 的安装包。
+bundled_git_dir = Path(SPECPATH) / 'vendor' / 'git'
+if not (bundled_git_dir / 'cmd' / 'git.exe').is_file():
+    raise SystemExit(
+        r'vendor\git 不存在，先运行 tools\fetch_minigit.ps1 获取内置 Git 再打包。'
+    )
+
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=qt_binaries,
-    datas=[('RepoPulse.png', '.')],
+    datas=[('RepoPulse.png', '.'), (str(bundled_git_dir), 'git')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
