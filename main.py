@@ -25,9 +25,13 @@ if sys.platform == "win32" and getattr(sys, "frozen", False):
     )
     _qt_preloaded = []
     for _qt_name in ("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"):
-        _qt_path = _bundle_root / "PyQt6" / _qt_name
-        if _qt_path.is_file():
-            _qt_preloaded.append(ctypes.WinDLL(str(_qt_path)))
+        # 顶层（如果还在）优先，其次 PyQt6\Qt6\bin —— 打包时只保留一份，
+        # 所以这里必须两处都找，才能保证预加载照旧生效。
+        for _qt_dir in _qt_dirs:
+            _qt_path = _qt_dir / _qt_name
+            if _qt_path.is_file():
+                _qt_preloaded.append(ctypes.WinDLL(str(_qt_path)))
+                break
 
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -112,6 +116,26 @@ def _print_git_info() -> int:
     return 0
 
 
+def _print_qt_info() -> int:
+    """--qt-self-test：只把 Qt 起起来再退出，验证打包后 Qt 能正常加载。
+
+    打包做过去重（每个 Qt DLL 只留一份）之后，光看文件在不在不够，
+    得真起一次 QApplication 才能确认平台插件也没问题。
+    这里不建窗口、不上托盘、不写 pid、不发遥测，可以放心地当自检用。
+    """
+    from PyQt6.QtCore import PYQT_VERSION_STR, QT_VERSION_STR
+    from PyQt6.QtWidgets import QApplication, QWidget
+
+    app = QApplication(sys.argv)
+    probe = QWidget()
+    probe.resize(320, 200)
+    print(f"Qt 版本：{QT_VERSION_STR}")
+    print(f"PyQt6 版本：{PYQT_VERSION_STR}")
+    print(f"平台插件：{app.platformName()}")
+    print(f"控件可用：{probe.size().width()}x{probe.size().height()}")
+    return 0
+
+
 def main() -> int:
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
@@ -120,6 +144,10 @@ def main() -> int:
     # 排障用：RepoPulse.exe --git-info 打印实际在用的 Git，然后直接退出
     if "--git-info" in sys.argv:
         return _print_git_info()
+
+    # 排障用：RepoPulse.exe --qt-self-test 验证 Qt 能加载，然后直接退出
+    if "--qt-self-test" in sys.argv:
+        return _print_qt_info()
 
     pid_path = _pid_file()
     _kill_stale_instance(pid_path)

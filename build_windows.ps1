@@ -68,6 +68,29 @@ if (-not (Test-Path (Join-Path $distApp "RepoPulse.exe"))) {
     throw "PyInstaller did not create dist\RepoPulse\RepoPulse.exe"
 }
 
+# 体积自检：Qt 运行时只该留一份（PyInstaller 的 PyQt6 hook 收到 _internal\PyQt6\Qt6\bin）。
+# 顶层若又冒出来同名同内容的副本，说明 spec 里的 qt_hook_collected 需要更新了。
+$qtTop = Join-Path $distApp "_internal\PyQt6"
+$qtBin = Join-Path $qtTop "Qt6\bin"
+$wasted = 0
+if (Test-Path $qtBin) {
+    foreach ($dll in Get-ChildItem -LiteralPath $qtTop -File -Filter *.dll) {
+        $twin = Join-Path $qtBin $dll.Name
+        if (Test-Path $twin) {
+            $hashA = (Get-FileHash -LiteralPath $dll.FullName -Algorithm SHA256).Hash
+            $hashB = (Get-FileHash -LiteralPath $twin -Algorithm SHA256).Hash
+            if ($hashA -eq $hashB) { $wasted += $dll.Length }
+        }
+    }
+}
+if ($wasted -gt 0) {
+    Write-Host ("[2/3] WARNING: duplicated Qt DLLs waste {0:N1} MB - update qt_hook_collected in RepoPulse.spec" -f ($wasted / 1MB))
+} else {
+    Write-Host "[2/3] Qt runtime duplicated: none"
+}
+$bundleSize = (Get-ChildItem -LiteralPath $distApp -Recurse -File | Measure-Object -Property Length -Sum).Sum
+Write-Host ("[2/3] Bundle size: {0:N1} MB" -f ($bundleSize / 1MB))
+
 Write-Host "[2/3] Compile Inno Setup installer ..."
 if (Test-Path $installerPath) {
     Remove-Item -LiteralPath $installerPath -Force
