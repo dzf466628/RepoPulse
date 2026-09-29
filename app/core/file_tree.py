@@ -9,11 +9,12 @@
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+from app.core.git_locator import resolve_git_path
 
 # GitHub 单文件硬限制
 LARGE_FILE_LIMIT = 100 * 1024 * 1024
@@ -117,7 +118,7 @@ class FileTreeService:
     def __init__(self, project_path: str | Path, log: Callable[[str], None] | None = None):
         self.root = Path(project_path).expanduser()
         self.log = log or (lambda _m: None)
-        self.git = shutil.which("git") or "git"
+        self.git = resolve_git_path() or "git"
         self._tracked_files: set[str] = set()
         self._untracked_visible: set[str] = set()  # 未跟踪但未被忽略（会被 git add 纳入）
         self._wildcard_ignored: set[str] = set()  # 被通配符规则忽略的文件

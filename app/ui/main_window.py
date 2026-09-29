@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app import __version__, telemetry
+from app.core.git_locator import check_git, missing_git_message
 from app.core.git_service import GitService
 from app.core.updater import UPDATE_URL, UpdateCheckThread
 from app.models import ProjectConfig, RemoteConfig
@@ -868,6 +869,7 @@ class MainWindow(QMainWindow):
         self._update_thread: UpdateCheckThread | None = None
         self._update_check_started = False
         QTimer.singleShot(250, lambda: self.refresh_all(track_usage=False))
+        QTimer.singleShot(1200, self._check_git_environment)
         QTimer.singleShot(2500, self._check_update_auto)
 
     def showEvent(self, event):  # noqa: N802 - Qt API
@@ -3218,6 +3220,21 @@ class MainWindow(QMainWindow):
         percentage = round(completed * 100 / total) if total else 0
         self.progress_bar.setValue(percentage)
         self._set_progress_style("running" if completed < total else "success")
+
+    # ------------------------------------------------------- Git 运行环境
+    def _check_git_environment(self) -> None:
+        """启动自检：内置 Git 在不在。
+
+        软件自带 MinGit，正常情况这里只往日志写一行，用户完全无感；
+        只有内置那份没了（被杀软删掉、安装不完整）才会弹提示 —— 而且要
+        说人话，不能像以前那样把 WinError 2 直接甩到脸上。
+        """
+        runtime, version = check_git()
+        if runtime is not None and version is not None:
+            self._append_log(f"Git 就绪：{runtime.source} · {version}")
+            return
+        self._append_log("没找到可用的 Git，提交同步会失败。")
+        QMessageBox.warning(self, "Git 没准备好", missing_git_message())
 
     # ------------------------------------------------------- 应用自动更新
     def _check_update_auto(self) -> None:

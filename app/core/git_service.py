@@ -17,6 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
+from app.core.git_locator import missing_git_message, resolve_git, support_paths
 from app.models import ProjectConfig, RemoteConfig
 
 
@@ -102,13 +103,26 @@ class GitService:
     def __init__(self, log: Callable[[str], None] | None = None, progress: Callable[[str, int, int, str], None] | None = None):
         self.log = log or (lambda _message: None)
         self.progress = progress or (lambda _task, _current, _total, _detail: None)
-        self.git = shutil.which("git") or "git"
+        # 内置 Git 优先（打包自带），没有才退回系统 PATH 里那份
+        self.git_runtime = resolve_git()
+        self.git = (
+            self.git_runtime.exe
+            if self.git_runtime is not None
+            else (shutil.which("git") or "git")
+        )
 
-    @staticmethod
-    def _base_env(extra_env: dict[str, str] | None = None) -> dict[str, str]:
-        """构造 Git 子进程环境，统一禁用交互式账号提示。"""
+    def _base_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        """构造 Git 子进程环境，统一禁用交互式账号提示。
+
+        用内置 Git 时，把它的 cmd / ucrt64\\bin / usr\\bin 放到 PATH 最前面：
+        这样 GIT_SSH_COMMAND 里的裸 ssh 找到的是内置那份（usr\\bin\\ssh.exe），
+        而不是碰巧系统里装了什么。
+        """
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
+        extra_paths = support_paths(self.git_runtime)
+        if extra_paths:
+            env["PATH"] = os.pathsep.join([*extra_paths, env.get("PATH", "")])
         if extra_env:
             env.update(extra_env)
         return env
@@ -123,6 +137,8 @@ class GitService:
         progress_task: str = "",
     ) -> str:
         """执行 Git 命令，可选捕获进度输出"""
+        if self.git_runtime is None:
+            raise GitCommandError(missing_git_message())
         if capture_progress and progress_task:
             return self._run_with_progress(args, cwd, timeout, extra_env, progress_task)
 
@@ -182,6 +198,8 @@ class GitService:
         stdout、stderr 各用一个独立线程读取，既避免管道写满阻塞，也不和
         communicate() 抢同一根管道；进度只从 stderr 解析，失败时保留完整 stderr。
         """
+        if self.git_runtime is None:
+            raise GitCommandError(missing_git_message())
         env = self._base_env(extra_env)
         command = [self.git, *args]
         process = subprocess.Popen(

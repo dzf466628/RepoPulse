@@ -94,10 +94,32 @@ from app.ui.main_window import MainWindow
 from app.ui.theme import apply_theme
 
 
+def _print_git_info() -> int:
+    """--git-info：打印软件实际在用的 Git，排障和打包后自检都用它。
+
+    控制台编码在上面已经切成 UTF-8，所以这里可以直接输出中文。
+    """
+    from app.core.git_locator import bundled_git_root, check_git, missing_git_message
+
+    runtime, version = check_git()
+    if runtime is None:
+        print(missing_git_message())
+        return 3
+    print(f"来源：{runtime.source}")
+    print(f"路径：{runtime.exe}")
+    print(f"版本：{version}")
+    print(f"内置目录：{bundled_git_root() or '（无）'}")
+    return 0
+
+
 def main() -> int:
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
+
+    # 排障用：RepoPulse.exe --git-info 打印实际在用的 Git，然后直接退出
+    if "--git-info" in sys.argv:
+        return _print_git_info()
 
     pid_path = _pid_file()
     _kill_stale_instance(pid_path)
