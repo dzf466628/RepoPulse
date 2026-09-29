@@ -6,7 +6,7 @@
 
 **把多处仓库的状态，放进同一张桌面**
 
-[![version](https://img.shields.io/badge/version-v1.0.16-16e5ee?style=flat-square)](https://github.com/dzf466628/RepoPulse/releases)
+[![version](https://img.shields.io/badge/version-v1.0.19-16e5ee?style=flat-square)](https://github.com/dzf466628/RepoPulse/releases)
 [![license](https://img.shields.io/badge/license-GPL--3.0-73df9a?style=flat-square)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.10%2B-ffc76b?style=flat-square)](https://www.python.org/)
 [![windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?style=flat-square)]()
@@ -85,10 +85,16 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 
 ```powershell
 python -m pip install -r requirements.txt
+pwsh -File tools\fetch_minigit.ps1   # 取一份内置 Git（约 91 MB，不进库）
 python main.py
 ```
 
-GitHub 私有仓库请先确认本机 SSH 或 Git Credential Manager 已配置好，并按需打开代理。
+软件自带 Git，用户不用单独安装（安装包内已含）；从源码跑时上面这条脚本会把
+MinGit 放到 `vendor\git`，没取到也能退回用系统已装的 Git。
+
+GitHub 私有仓库请先确认本机 SSH 密钥已配置好（也可以用 Token），并按需打开代理。
+
+自检命令：`python main.py --git-info` 会打印软件实际在用的那一份 Git。
 
 ### 下载安装包
 
@@ -104,6 +110,17 @@ GitHub 私有仓库请先确认本机 SSH 或 Git Credential Manager 已配置�
 <summary><b>RepoPulse 会替代命令行 Git 吗？</b></summary>
 
 不会。它只负责状态查看和快捷入口，底层仍然调用 Git；rebase、cherry-pick、冲突编辑等高级操作继续交给你熟悉的工具。
+
+</details>
+
+<details>
+<summary><b>要自己先装 Git 吗？</b></summary>
+
+不用。安装包自带一份精简版 Git（MinGit，约 91 MB，单独放在软件目录里，不写注册表、不改系统 PATH），
+装完打开就能用。软件按这个顺序找 Git：**内置那份 → 用户目录 → 系统 PATH**；
+万一内置那份被杀毒软件删了，它会自动用你电脑上装的 Git，并且弹一句人话提示，而不是甩一个系统报错。
+
+排障时运行 `RepoPulse.exe --git-info`，会直接告诉你当前用的是哪一份 Git、什么版本。
 
 </details>
 
