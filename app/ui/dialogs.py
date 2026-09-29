@@ -40,7 +40,8 @@ from PyQt6.QtWidgets import (
 )
 
 from app import __version__
-from app.core.git_locator import check_git
+from app.core import path_registry
+from app.core.git_locator import check_git, git_lfs_version
 from app.core.git_service import GitCommandError, GitService
 
 
@@ -259,8 +260,10 @@ def about_git_line() -> str:
         return "运行环境：没找到 Git，新建项目、提交同步会失败"
     short = version.replace("git version", "").strip()  # 2.56.0.windows.1
     short = ".".join(short.split(".")[:3])  # 2.56.0 —— 给用户看不啰嗦
+    lfs = git_lfs_version(runtime)
     if runtime.source == "内置":
-        return f"运行环境：内置 Git {short} · 无需自己安装"
+        extra = f" + LFS {lfs}" if lfs else ""
+        return f"运行环境：内置 Git {short}{extra} · 无需自己安装"
     return f"运行环境：{runtime.source} Git {short}"
 
 
@@ -1207,6 +1210,24 @@ class SettingsDialog(QDialog):
         layout.addWidget(title)
         layout.addLayout(form)
 
+        git_title = QLabel("Git 运行环境")
+        git_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #F4F7FB; margin-top: 10px;")
+        self.git_path_check = JellyCheckBox("让命令行 / AI / IDE 也能用这个 Git")
+        self.git_path_check.setToolTip(
+            "把软件自带的 Git 登记到你的用户 PATH，其他程序打开就能直接敲 git，"
+            "不用另外装一个"
+        )
+        self.git_path_check.setChecked(path_registry.is_registered())
+        self.git_path_check.toggled.connect(self._toggle_git_path)
+        self.git_path_hint = QLabel("")
+        self.git_path_hint.setStyleSheet("color: #8FA3B2; font-size: 11px;")
+        self.git_path_hint.setWordWrap(True)
+        self._refresh_git_path_hint()
+
+        layout.addWidget(git_title)
+        layout.addWidget(self.git_path_check)
+        layout.addWidget(self.git_path_hint)
+
         update_title = QLabel("版本更新")
         update_title.setStyleSheet("font-size: 13px; font-weight: 700; color: #F4F7FB; margin-top: 10px;")
         update_row = QHBoxLayout()
@@ -1223,6 +1244,32 @@ class SettingsDialog(QDialog):
         layout.addLayout(update_row)
         layout.addStretch(1)
         return page
+
+    def _refresh_git_path_hint(self) -> None:
+        """这行灰字只做一件事：让用户看得见"现在外面能不能用上这份 Git"。"""
+        directory = path_registry.git_cmd_dir()
+        if directory is None:
+            self.git_path_check.setEnabled(False)
+            self.git_path_hint.setText("没找到内置 Git，重装一遍 RepoPulse 就好")
+            return
+        self.git_path_check.setEnabled(True)
+        if self.git_path_check.isChecked():
+            self.git_path_hint.setText(f"已登记，其他程序能直接用：{directory}")
+        else:
+            self.git_path_hint.setText("没登记，这份 Git 只有 RepoPulse 自己用")
+
+    def _toggle_git_path(self, checked: bool) -> None:
+        """切换开关就立刻写/撤 PATH，成功失败都在下面那行灰字里说清楚。"""
+        ok, note = path_registry.register() if checked else path_registry.unregister()
+        if not ok:
+            # 写不进去就退回原状态，别让界面显示的和实际不一致
+            self.git_path_check.blockSignals(True)
+            self.git_path_check.setChecked(not checked)
+            self.git_path_check.blockSignals(False)
+            self.git_path_hint.setStyleSheet("color: #E5A16E; font-size: 11px;")
+        else:
+            self.git_path_hint.setStyleSheet("color: #8FA3B2; font-size: 11px;")
+        self.git_path_hint.setText(note)
 
     def _save_software_settings(self) -> None:
         try:
