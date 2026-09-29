@@ -6,7 +6,7 @@
 
 **把多处仓库的状态，放进同一张桌面**
 
-[![version](https://img.shields.io/badge/version-v1.0.20-16e5ee?style=flat-square)](https://github.com/dzf466628/RepoPulse/releases)
+[![version](https://img.shields.io/badge/version-v1.0.22-16e5ee?style=flat-square)](https://github.com/dzf466628/RepoPulse/releases)
 [![license](https://img.shields.io/badge/license-GPL--3.0-73df9a?style=flat-square)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.10%2B-ffc76b?style=flat-square)](https://www.python.org/)
 [![windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?style=flat-square)]()
@@ -25,6 +25,15 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 ---
 
 ## 核心能力
+
+### 自带 Git — 装完就能用，不用先折腾环境
+
+安装包内置一份精简版 Git（MinGit，约 91 MB），放在软件自己的目录里，**不写注册表、不改系统 PATH**。电脑上从来没装过 Git，打开也能直接建项目、提交、同步。
+
+- 查找顺序：**内置那份 → 用户目录 → 系统 PATH**，内置优先，版本和行为都可控
+- 万一内置那份被杀毒软件删了，会自动改用你电脑上装的 Git，并弹一句人话提示，而不是甩一个系统报错
+- 排障一条命令：`RepoPulse.exe --git-info`；「设置 → 关于」里也写着当前用的是哪一份、什么版本
+- 内置的 Git 以 **GNU GPL v2** 分发，许可证全文随程序附在 `_internal\git\LICENSE.txt`
 
 ### 项目总览 — 先看全局再点细节
 
@@ -101,6 +110,8 @@ GitHub 私有仓库请先确认本机 SSH 密钥已配置好（也可以用 Toke
 前往 [软件官网](https://duadu.cc/app/RepoPulse/index.html) 获取最新 Windows 安装包。
 
 安装包面向 Windows 10 / 11 64 位，使用目录版打包。
+
+**不需要先装 Git**：安装包已内置一份精简版 Git，装完打开就能用。
 
 ---
 
