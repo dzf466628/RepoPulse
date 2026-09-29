@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app import __version__
+from app.core.git_locator import check_git
 from app.core.git_service import GitCommandError, GitService
 
 
@@ -239,11 +240,28 @@ class JellyCheckBox(QCheckBox):
 # 关于页展示的第三方开源组件：(名称, 许可证, 作者/机构)
 ABOUT_COMPONENTS = [
     ("PyQt6 (Qt for Python)", "GPL v3 / Commercial", "Riverbank Computing"),
-    ("Git", "GPL v2", "Git Project"),
+    ("Git（内置 MinGit）", "GPL v2", "Git Project"),
     ("PyInstaller", "GPL v2+ with Bootloader Exception", "PyInstaller Development Team"),
     ("Inno Setup 6", "Inno Setup License", "Jordan Russell"),
     ("简体中文翻译", "Inno Setup 社区翻译", "kira-96"),
 ]
+
+
+def about_git_line() -> str:
+    """关于页那行"运行环境"。
+
+    平常一句话带过，不打扰用户 —— 软件自带 Git，用户不需要知道它存在。
+    但真来报 bug 时，让他截一张关于页的图，就能看出他那边用的是内置那份
+    还是系统那份、版本多少，省得猜。
+    """
+    runtime, version = check_git()
+    if runtime is None or version is None:
+        return "运行环境：没找到 Git，新建项目、提交同步会失败"
+    short = version.replace("git version", "").strip()  # 2.56.0.windows.1
+    short = ".".join(short.split(".")[:3])  # 2.56.0 —— 给用户看不啰嗦
+    if runtime.source == "内置":
+        return f"运行环境：内置 Git {short} · 无需自己安装"
+    return f"运行环境：{runtime.source} Git {short}"
 
 
 GIT_TYPES = [
@@ -1274,6 +1292,11 @@ class SettingsDialog(QDialog):
         desc.setStyleSheet("color: #C2CED9; font-size: 12px;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
+
+        # 灰字一行交代运行环境：平时不打扰，用户和排障时又能查到
+        git_lbl = QLabel(about_git_line())
+        git_lbl.setStyleSheet("color: #8FA3B2; font-size: 11px;")
+        layout.addWidget(git_lbl)
 
         layout.addWidget(self._about_separator())
 
