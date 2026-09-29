@@ -25,7 +25,7 @@ from app.core.git_locator import (
 from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
-from app.ui.main_window import BADGE_TEXT, MainWindow, sync_badge_text
+from app.ui.main_window import BADGE_TEXT, MainWindow, badge_color, sync_badge_text
 
 
 app = QApplication(sys.argv)
@@ -209,6 +209,21 @@ def test_badge_states() -> None:
         window.close()
 
 
+def test_badge_colors_per_state() -> None:
+    """四个状态四个颜色，而且跨渠道一致（同一个词不许两种颜色）。"""
+    colors = {
+        "一致": badge_color("一致", "clean"),
+        "待推送": badge_color("待推送", "different"),
+        "待拉取": badge_color("待拉取", "different"),
+        "已分叉": badge_color("已分叉", "warning"),
+    }
+    assert len(set(colors.values())) == 4, f"四个状态颜色有重复：{colors}"
+    for text in ("一致", "待推送", "待拉取", "已分叉", "待同步", "已忽略"):
+        assert badge_color(text, "warning") == badge_color(text, "different"), (
+            f"「{text}」在不同渠道颜色不一样"
+        )
+
+
 if __name__ == "__main__":
     print("=" * 50)
     check("主窗口创建", test_window_creates)
@@ -223,6 +238,7 @@ if __name__ == "__main__":
     check("不顶掉用户自配的有效证书", test_ssl_override_keeps_valid_ca)
     check("角标文案放得下（≤116px）", test_badge_texts_fit)
     check("角标状态与方向映射", test_badge_states)
+    check("角标按状态配色（四态四色）", test_badge_colors_per_state)
     print("=" * 50)
     print(f"PASSED {PASSED}  |  FAILED {FAILED}")
     raise SystemExit(0 if FAILED == 0 else 1)

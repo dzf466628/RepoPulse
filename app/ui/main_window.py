@@ -287,6 +287,28 @@ BADGE_TEXT = {
 }
 
 
+# 角标颜色表：一个状态一个颜色，跨渠道一致（原来颜色跟着 state_key 走，于是
+# 「待推送 / 待拉取 / 已分叉」三个状态同一种颜色，同一个词在本地渠道又是另一种
+# 颜色，看着根本分不出状态）。绿=没事，蓝=要往外送，紫=要往里取，黄=要认真看一眼。
+BADGE_COLORS = {
+    "一致": "#70D6A5",
+    "待推送": "#9CC6FF",
+    "待拉取": "#B39CFF",
+    "已分叉": "#F5C26B",
+    "待同步": "#9CC6FF",
+    "已忽略": "#F5C26B",
+    "等待检查": "#A9B5C8",
+    "未创建": "#8A97AA",
+    "待创建": "#8A97AA",
+    "待首次同步": "#8A97AA",
+    "未连接": "#F27788",
+    "连接失败": "#F27788",
+    "读取失败": "#F27788",
+    "未配置": "#9CC6FF",
+    "分支不存在": "#9CC6FF",
+}
+
+
 def sync_badge_text(data: dict) -> str:
     """按 ahead / behind 给方向角标：该往哪边走，一眼就知道点哪个按钮。
 
@@ -304,6 +326,16 @@ def sync_badge_text(data: dict) -> str:
     return "一致"
 
 
+def badge_color(text: str, state_key: str = "") -> str:
+    """角标颜色只表达状态，不看是哪个渠道。
+
+    原来颜色是跟着 state_key 走的，于是「待推送 / 待拉取 / 已分叉」三个状态同一种颜色，
+    而同一个词在本地渠道又是另一种颜色，看着根本分不出状态。现在一个状态一个颜色：
+    绿=没事，蓝=要往外送，紫=要往里取，黄=要认真看一眼，红=出错，灰=还没查。
+    """
+    return BADGE_COLORS.get(text) or STATE_COLORS.get(state_key, STATE_COLORS["waiting"])
+
+
 def state_key_from_color(color: str) -> str:
     c = (color or "").lower()
     if c == "#70d6a5":
@@ -312,7 +344,7 @@ def state_key_from_color(color: str) -> str:
         return "warning"
     if c == "#f27788":
         return "error"
-    if c == "#9cc6ff":
+    if c in ("#9cc6ff", "#b39cff"):
         return "different"
     return "waiting"
 
@@ -1926,13 +1958,13 @@ class MainWindow(QMainWindow):
                 continue
             data = remotes_data.get(key)
             rk, tip = self._remote_state_key(remote, data)
+            color = badge_color(tip, rk)
             # 悬浮窗这里是 ring 的 tooltip（悬停才显示），不是可见文本，
             # 所以可以带上真实原因；仍然限长，避免 tooltip 糊一屏。
             reason = self._remote_reason(remote, data)
             if reason:
                 tip = f"{tip} · {reason[:80]}"
-            fw.set_channel_state(key, rk, STATE_COLORS.get(rk, STATE_COLORS["waiting"]),
-                                 f"{remote.label or key}：{tip}")
+            fw.set_channel_state(key, rk, color, f"{remote.label or key}：{tip}")
         busy = self.worker is not None and self.worker.isRunning()
         fw.set_sync_enabled(bool(project.sync_enabled) and not busy)
 
@@ -2145,15 +2177,8 @@ class MainWindow(QMainWindow):
         # 使用 _remote_state_key 统一判断状态
         state_key, state_text = self._remote_state_key(remote, data)
         
-        # 根据状态设置颜色
-        color_map = {
-            "waiting": "#A9B5C8",  # 灰色
-            "clean": "#70D6A5",     # 绿色
-            "warning": "#F5C26B",   # 黄色
-            "error": "#F27788",     # 红色
-            "different": "#9CC6FF", # 蓝色
-        }
-        color = color_map.get(state_key, "#A9B5C8")
+        # 角标颜色只由状态决定，和是哪个渠道无关
+        color = badge_color(state_text, state_key)
         
         # 如果是"待创建"状态，返回简化的卡片
         if state_key == "waiting" and state_text in ["待创建", "待首次同步"]:
