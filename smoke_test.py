@@ -14,7 +14,13 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from app.core.git_locator import bundled_git_root, check_git, git_lfs_version
+from app.core.git_locator import (
+    bundled_git_root,
+    ca_bundle_path,
+    check_git,
+    git_lfs_version,
+    ssl_override_args,
+)
 from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
@@ -97,6 +103,55 @@ def test_lfs_ready() -> None:
     assert service.ensure_lfs().startswith("LFS 就绪"), "LFS 启动自检没通过"
 
 
+def _with_global_config(content: str):
+    """临时把全局配置换掉（用 GIT_CONFIG_GLOBAL），返回一个 contextmanager 式的还原函数。"""
+    directory = tempfile.mkdtemp()
+    config = Path(directory) / "gitconfig"
+    config.write_text(content, encoding="utf-8")
+    previous = os.environ.get("GIT_CONFIG_GLOBAL")
+    os.environ["GIT_CONFIG_GLOBAL"] = str(config)
+    ssl_override_args.cache_clear()
+
+    def restore() -> None:
+        ssl_override_args.cache_clear()
+        if previous is None:
+            os.environ.pop("GIT_CONFIG_GLOBAL", None)
+        else:
+            os.environ["GIT_CONFIG_GLOBAL"] = previous
+
+    return restore
+
+
+def test_bundled_ca_bundle() -> None:
+    runtime, _version = check_git()
+    bundle = ca_bundle_path(runtime)
+    assert bundle is not None and bundle.is_file(), "内置 Git 缺少 CA 证书，HTTPS 渠道会全部连不上"
+
+
+def test_ssl_override_when_ca_broken() -> None:
+    """证书路径被外部配置写坏时必须自动补上内置证书。
+
+    不然表现就是：网络明明是通的，界面上却一直显示「GitHub 已忽略」。
+    """
+    restore = _with_global_config("[http]\n\tsslCAInfo = C:/definitely/not/here/ca.crt\n")
+    try:
+        assert "http.sslCAInfo=" in " ".join(ssl_override_args()), "坏证书路径没有触发兜底"
+    finally:
+        restore()
+
+
+def test_ssl_override_keeps_valid_ca() -> None:
+    """用户自己配的有效证书不能被顶掉（企业内网自签 CA）。"""
+    with tempfile.TemporaryDirectory() as directory:
+        bundle = Path(directory) / "ca.crt"
+        bundle.write_text("dummy\n", encoding="utf-8")
+        restore = _with_global_config(f"[http]\n\tsslCAInfo = {bundle.as_posix()}\n")
+        try:
+            assert ssl_override_args() == (), "用户自己配的有效证书被顶掉了"
+        finally:
+            restore()
+
+
 if __name__ == "__main__":
     print("=" * 50)
     check("主窗口创建", test_window_creates)
@@ -106,6 +161,9 @@ if __name__ == "__main__":
     check("GitService 绑定内置 Git", test_git_service_uses_bundled)
     check("内置 git-lfs 已就位", test_bundled_lfs_present)
     check("LFS 可用", test_lfs_ready)
+    check("内置 CA 证书已就位", test_bundled_ca_bundle)
+    check("证书路径坏掉时自动兜底", test_ssl_override_when_ca_broken)
+    check("不顶掉用户自配的有效证书", test_ssl_override_keeps_valid_ca)
     print("=" * 50)
     print(f"PASSED {PASSED}  |  FAILED {FAILED}")
     raise SystemExit(0 if FAILED == 0 else 1)

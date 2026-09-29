@@ -17,7 +17,13 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from app.core.git_locator import git_lfs_version, missing_git_message, resolve_git, support_paths
+from app.core.git_locator import (
+    git_lfs_version,
+    missing_git_message,
+    resolve_git,
+    ssl_override_args,
+    support_paths,
+)
 from app.models import ProjectConfig, RemoteConfig
 
 
@@ -110,6 +116,10 @@ class GitService:
             if self.git_runtime is not None
             else (shutil.which("git") or "git")
         )
+        # 证书兜底：外部环境（典型是卸载 Git 残留的系统配置）可能把 http.sslCAInfo
+        # 写成一个不存在的路径，那会让所有 HTTPS 都变成"连不上"，界面上只会显示
+        # 「GitHub 已忽略」。这里一次性算好要补的参数，之后每条命令都带上。
+        self.ssl_args = list(ssl_override_args(self.git_runtime))
 
     def _base_env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
         """构造 Git 子进程环境，统一禁用交互式账号提示。
@@ -170,7 +180,7 @@ class GitService:
             return self._run_with_progress(args, cwd, timeout, extra_env, progress_task)
 
         env = self._base_env(extra_env)
-        command = [self.git, *args]
+        command = [self.git, *self.ssl_args, *args]
         try:
             result = subprocess.run(
                 command,
@@ -191,7 +201,7 @@ class GitService:
             # Retry only when Git explicitly reports the loopback proxy refusal;
             # the user's global Git configuration remains untouched.
             if "127.0.0.1:11304" in detail:
-                direct_command = [self.git, "-c", "http.https://github.com.proxy=", *args]
+                direct_command = [self.git, *self.ssl_args, "-c", "http.https://github.com.proxy=", *args]
                 try:
                     direct_result = subprocess.run(
                         direct_command,
@@ -228,7 +238,7 @@ class GitService:
         if self.git_runtime is None:
             raise GitCommandError(missing_git_message())
         env = self._base_env(extra_env)
-        command = [self.git, *args]
+        command = [self.git, *self.ssl_args, *args]
         process = subprocess.Popen(
             command,
             cwd=str(cwd) if cwd else None,

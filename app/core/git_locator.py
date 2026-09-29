@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 # 排障用：设了这个环境变量就直接用它指的 git.exe，跳过全部查找
@@ -118,34 +119,103 @@ def git_version(exe: str, timeout: int = 15) -> str | None:
     return text or None
 
 
-def git_lfs_version(runtime: GitRuntime, timeout: int = 15) -> str | None:
-    """跑一次 git lfs version，返回精简版本号（如 3.8.0）；没带 LFS 返回 None。
+def _env_for(runtime: GitRuntime) -> dict[str, str]:
+    """跑 git 子进程时用的环境：把内置目录放到 PATH 最前面。
 
-    Git 是在 PATH 里找 git-lfs 的，而内置那份不保证在 PATH 上，所以这里把内置
-    目录临时拼进 PATH —— 要判断的是"这份 Git 到底带没带 LFS"，不能受外部 PATH 影响。
+    内置那份不保证在 PATH 上（用户可能没勾"登记到 PATH"），所以判断"这份 Git 到底
+    带了什么"时必须自己拼，不能受外部 PATH 影响。
     """
     env = os.environ.copy()
     paths = list(support_paths(runtime))
     if paths:
         env["PATH"] = os.pathsep.join([*paths, env.get("PATH", "")])
+    return env
+
+
+def _run_git(runtime: GitRuntime, args: list[str], timeout: int = 15) -> str | None:
+    """跑一条 git 命令，返回输出（没有输出返回 None），跑不起来也返回 None。"""
     try:
         result = subprocess.run(
-            [runtime.exe, "lfs", "version"],
+            [runtime.exe, *args],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
-            env=env,
+            env=_env_for(runtime),
             creationflags=_CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    text = (result.stdout or result.stderr or "").strip()
-    first = text.split()[0] if text else ""
+    return (result.stdout or result.stderr or "").strip() or None
+
+
+def git_lfs_version(runtime: GitRuntime, timeout: int = 15) -> str | None:
+    """跑一次 git lfs version，返回精简版本号（如 3.8.0）；没带 LFS 返回 None。"""
+    text = _run_git(runtime, ["lfs", "version"], timeout)
+    if not text:
+        return None
+    first = text.split()[0]
     if not first.startswith("git-lfs/"):
         return None
     return first.split("/", 1)[1]
+
+
+# 内置 MinGit 自带证书的几种摆放位置（版本不同略有差异，按顺序取第一个存在的）
+CA_BUNDLE_RELATIVE = (
+    ("ucrt64", "etc", "ssl", "certs", "ca-bundle.crt"),
+    ("mingw64", "etc", "ssl", "certs", "ca-bundle.crt"),
+    ("etc", "ssl", "certs", "ca-bundle.crt"),
+)
+
+
+def ca_bundle_path(runtime: GitRuntime | None = None) -> Path | None:
+    """这份 Git 自带的 CA 证书文件；找不到返回 None。"""
+    runtime = runtime or resolve_git()
+    if runtime is None or runtime.root is None:
+        return None
+    for parts in CA_BUNDLE_RELATIVE:
+        candidate = runtime.root.joinpath(*parts)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _configured_ca_bundle(runtime: GitRuntime) -> str | None:
+    """读当前生效的 http.sslCAInfo —— 可能来自用户配置，也可能是别处 include 进来的。"""
+    return _run_git(runtime, ["config", "--get", "http.sslCAInfo"])
+
+
+@lru_cache(maxsize=4)
+def ssl_override_args(runtime: GitRuntime | None = None) -> tuple[str, ...]:
+    r"""给 git 补的证书参数；不需要补就返回空元组。
+
+    要出手的两种情况，都是"外部环境把内置 Git 弄坏"：
+
+    1. 生效的 http.sslCAInfo 指向的文件不存在。典型场景：用户以前装过 Git 又卸载，
+       卸载残留的系统配置里还写着旧证书路径；而 MinGit 的 etc\gitconfig 里有一条
+       include 专门去继承 Git for Windows 的系统配置（MinGit 的官方设计，为了拿到
+       core.autocrlf 这类设置），于是坏路径被继承进来 —— 所有 HTTPS 全失败，
+       界面上只看到「GitHub 已忽略」，根本猜不到是证书的问题。
+    2. 没配证书、但内置目录路径含非 ASCII 字符（比如装在中文目录里）。git 自己推出
+       来的默认证书路径在这种目录下打不开，而显式传参反而正常（这点实测过）。
+
+    用户自己配了**有效**证书时不动它 —— 企业内网自签 CA 不能被我们顶掉。
+    结果缓存是因为每次构造 GitService 都会问一次，而它在一个进程里是稳定的。
+    """
+    runtime = runtime or resolve_git()
+    if runtime is None or runtime.root is None:
+        return ()  # 用的系统 Git，不掺和它的证书配置
+    bundle = ca_bundle_path(runtime)
+    if bundle is None:
+        return ()
+    configured = _configured_ca_bundle(runtime)
+    if configured:
+        if Path(configured).is_file():
+            return ()  # 用户配的证书是好的，尊重它
+    elif runtime.exe.isascii():
+        return ()  # 没配证书、路径又纯 ASCII —— git 默认就找得到，不用管
+    return ("-c", f"http.sslCAInfo={bundle}")
 
 
 def check_git() -> tuple[GitRuntime | None, str | None]:

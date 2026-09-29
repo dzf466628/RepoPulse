@@ -103,7 +103,13 @@ def _print_git_info() -> int:
 
     控制台编码在上面已经切成 UTF-8，所以这里可以直接输出中文。
     """
-    from app.core.git_locator import bundled_git_root, check_git, git_lfs_version, missing_git_message
+    from app.core.git_locator import (
+        bundled_git_root,
+        check_git,
+        git_lfs_version,
+        missing_git_message,
+        ssl_override_args,
+    )
 
     runtime, version = check_git()
     if runtime is None:
@@ -113,6 +119,8 @@ def _print_git_info() -> int:
     print(f"路径：{runtime.exe}")
     print(f"版本：{version}")
     print(f"LFS：{git_lfs_version(runtime) or '（这份 Git 没带 LFS）'}")
+    # 外部配置把证书路径写坏时会自动兜底，这里把它显出来，省得排障时又去猜
+    print(f"TLS 兜底：{'启用（外部证书路径不可用，已改用内置证书）' if ssl_override_args(runtime) else '不需要'}")
     print(f"内置目录：{bundled_git_root() or '（无）'}")
     return 0
 
