@@ -79,6 +79,7 @@ class FileNode:
     children: list["FileNode"] = field(default_factory=list)
     parent: Optional["FileNode"] = None
     collapsed_large: bool = False  # 大目录只显示本身不展开
+    rule_ignored: bool = False  # 被用户手写通配符规则忽略（开关禁用）
 
     @property
     def display_size(self) -> str:
@@ -119,6 +120,7 @@ class FileTreeService:
         self.git = shutil.which("git") or "git"
         self._tracked_files: set[str] = set()
         self._untracked_visible: set[str] = set()  # 未跟踪但未被忽略（会被 git add 纳入）
+        self._wildcard_ignored: set[str] = set()  # 被通配符规则忽略的文件
 
     def _git(self, args: list[str], timeout: int = 30) -> str:
         """执行 git 命令，返回 stdout；失败返回空字符串。"""
@@ -146,6 +148,7 @@ class FileTreeService:
         self._load_git_file_sets()
         root_node = FileNode(name=self.root.name, rel_path="", is_dir=True)
         self._scan_directory(self.root, root_node)
+        self._mark_wildcard_ignored(root_node)
         return root_node
 
     def _load_git_file_sets(self) -> None:
@@ -156,6 +159,68 @@ class FileTreeService:
         # 未跟踪但未被 .gitignore 忽略（git add -A 会纳入的新文件）
         out2 = self._git(["ls-files", "--others", "--exclude-standard", "-z"], timeout=30)
         self._untracked_visible = {p.replace("\\", "/") for p in out2.split("\0") if p} if out2 else set()
+
+    def _mark_wildcard_ignored(self, root: FileNode) -> None:
+        """遍历树，对被忽略的文件批量 check-ignore -v，判断是否为通配符规则。
+
+        被通配符规则（*.log 等）忽略的文件，可视化开关无法精确控制，标记禁用。
+        被精确路径规则（/a.py）忽略的文件，开关仍可操作。
+        """
+        ignored_paths: list[str] = []
+
+        def collect(node: FileNode) -> None:
+            if node.ignored and not node.tracked and not node.disabled:
+                ignored_paths.append(node.rel_path + ("/" if node.is_dir else ""))
+            for child in node.children:
+                collect(child)
+
+        collect(root)
+        if not ignored_paths:
+            return
+
+        # 批量调用 git check-ignore -v --stdin（-z 用 NUL 分隔）
+        import subprocess as _sp
+        try:
+            proc = _sp.run(
+                [self.git, "check-ignore", "-v", "-z", "--stdin"],
+                cwd=str(self.root),
+                input="\0".join(ignored_paths) + "\0",
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=30,
+                creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0),
+            )
+        except (_sp.TimeoutExpired, OSError):
+            return
+
+        # -z 输出：source\0linenum\0pattern\0pathname\0 每组4个字段
+        parts = proc.stdout.split("\0") if proc.stdout else []
+        wildcard_paths: set[str] = set()
+        # 每组 4 个字段
+        i = 0
+        while i + 3 < len(parts):
+            source = parts[i]
+            pattern = parts[i + 2]
+            pathname = parts[i + 3]
+            # 通配符规则：pattern 含 * ? [ ；精确路径规则（/foo、/bar/）可操作
+            if any(ch in pattern for ch in "*?["):
+                clean_path = pathname.rstrip("/")
+                wildcard_paths.add(clean_path)
+            i += 4
+        self._wildcard_ignored = wildcard_paths
+
+        # 标记节点
+        def mark(node: FileNode) -> None:
+            if node.rel_path in wildcard_paths and not node.disabled:
+                node.rule_ignored = True
+                node.disabled = True
+                node.disabled_reason = "由 .gitignore 规则忽略"
+            for child in node.children:
+                mark(child)
+
+        mark(root)
 
     def _scan_directory(self, dir_path: Path, parent_node: FileNode) -> None:
         """递归扫描目录。"""

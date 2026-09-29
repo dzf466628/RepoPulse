@@ -324,7 +324,6 @@ class DragPreview(QWidget):
 
 class StatusCard(QFrame):
     clicked = pyqtSignal(str)
-    double_clicked = pyqtSignal(str)
     context_menu_requested = pyqtSignal(str, QPoint)
     drag_started = pyqtSignal(str)
     drag_finished = pyqtSignal(str, QPoint)
@@ -543,11 +542,6 @@ class StatusCard(QFrame):
             self._press_pos = None
             self._dragging = False
         super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 - Qt API
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.double_clicked.emit(self.card_key)
-        super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt API
         self.context_menu_requested.emit(self.card_key, event.globalPos())
@@ -1914,7 +1908,6 @@ class MainWindow(QMainWindow):
 
     def _add_card(self, key: str, card: StatusCard, index: int) -> None:
         card.clicked.connect(self._select_card)
-        card.double_clicked.connect(self._on_card_double_clicked)
         card.context_menu_requested.connect(self._show_card_context_menu)
         card.drag_started.connect(self._start_card_drag)
         card.drag_finished.connect(self._finish_card_drag)
@@ -2222,6 +2215,7 @@ class MainWindow(QMainWindow):
                 self._start_discover_repos(detail, remote)
             if key == "__staging__":
                 detail.view_project_requested.connect(lambda: self._open_project_folder(project))
+                detail.manage_files_requested.connect(lambda: self._open_file_manager(project, detail))
                 detail.migrate_project_requested.connect(lambda: self._migrate_project(detail, project))
                 detail.rename_project_requested.connect(lambda: self._rename_project(detail, project))
                 detail.delete_project_requested.connect(lambda: self._delete_from_staging_detail(detail, project))
@@ -3631,20 +3625,20 @@ class MainWindow(QMainWindow):
     # 卡片右键菜单
     # ------------------------------------------------------------------
 
-    def _on_card_double_clicked(self, key: str) -> None:
-        """双击暂存区卡片 -> 打开文件跟踪管理对话框。"""
-        if key != "__staging__":
-            return
-        project = self._current_project()
+    def _open_file_manager(self, project, detail_dialog=None) -> None:
+        """从暂存区详情弹窗打开文件跟踪管理对话框。"""
         if not project or not project.workspace_path:
             return
         source = Path(project.workspace_path).expanduser()
         if not source.exists():
             QMessageBox.warning(self, "提示", f"项目目录不存在：\n{source}")
             return
-        dlg = FileTreeDialog(source, project.name, self)
-        dlg.exec()
+        file_dlg = FileTreeDialog(source, project.name, self)
+        file_dlg.exec()
         self.refresh_selected(show_dialog=False)
+        # 文件管理可能改变跟踪状态，刷新详情里的统计
+        if detail_dialog is not None and not self._current_project():
+            return
 
     def _show_card_context_menu(self, key: str, global_pos: QPoint) -> None:
         project = self._current_project()

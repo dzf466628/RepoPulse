@@ -423,6 +423,7 @@ class RepositoryDetailDialog(QDialog):
     migrate_project_requested = pyqtSignal()
     rename_project_requested = pyqtSignal()
     delete_project_requested = pyqtSignal()
+    manage_files_requested = pyqtSignal()
 
     def __init__(
         self,
@@ -557,6 +558,14 @@ class RepositoryDetailDialog(QDialog):
             value_label.setWordWrap(True)
             info_layout.addRow(label, value_label)
 
+        files_button = QPushButton("文件管理")
+        files_button.setFixedHeight(30)
+        files_button.setStyleSheet(
+            f"QPushButton {{ background: {ACCENT_COLOR}; color: #071D2C; font-weight: 700; padding: 0 14px; border: none; border-radius: 5px; }}"
+            f"QPushButton:hover {{ background: {ACCENT_HOVER}; }}"
+        )
+        files_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        files_button.clicked.connect(self.manage_files_requested.emit)
         view_button = QPushButton("查看")
         view_button.setFixedHeight(30)
         view_button.clicked.connect(self.view_project_requested.emit)
@@ -577,6 +586,7 @@ class RepositoryDetailDialog(QDialog):
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
         footer.setSpacing(SPACE_1)
+        footer.addWidget(files_button)
         footer.addWidget(view_button)
         footer.addWidget(migrate_button)
         footer.addWidget(rename_button)
