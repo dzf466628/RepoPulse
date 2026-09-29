@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 # RepoPulse 一键打包：PyInstaller onedir -> Inno Setup 安装包
 # 版本号唯一来源 app/__init__.py 的 __version__；每次打包自动把 patch 位 +1，
