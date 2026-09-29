@@ -25,7 +25,15 @@ from app.core.git_locator import (
 from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
-from app.ui.main_window import BADGE_TEXT, MainWindow, badge_color, sync_badge_text
+from app.ui.main_window import (
+    BADGE_TEXT,
+    MainWindow,
+    StatusCard,
+    badge_color,
+    render_glyph_pixmap,
+    short_number,
+    sync_badge_text,
+)
 
 
 app = QApplication(sys.argv)
@@ -224,6 +232,52 @@ def test_badge_colors_per_state() -> None:
         )
 
 
+def test_stat_icons() -> None:
+    """star / eye 图标要画得出来，尺寸固定 13px。"""
+    for kind in ("star", "eye"):
+        pixmap = render_glyph_pixmap(kind, "", 13)
+        assert not pixmap.isNull() and pixmap.width() == 13, f"{kind} 图标画不出来"
+
+
+def test_short_number() -> None:
+    """热度数字必须压到很窄，不然会把卡片标题挤到换行。"""
+    assert short_number(1) == "1"
+    assert short_number(999) == "999"
+    assert short_number(1234) == "1.2k"
+    assert short_number(9999) == "10k"
+    assert short_number(123456) == "12.3w"
+    assert short_number(999999) == "100w"
+    assert short_number(None) == ""
+    assert len(short_number(999999)) <= 5
+
+
+def test_github_stats_widget_width() -> None:
+    """星标 + 浏览量那一块要窄（角标左边就那么点地方）。"""
+    card = StatusCard(
+        "k", "GitHub Remote · GitHub", "", "待推送", "#9CC6FF", "地址：x",
+        rich_body=True, recent_commit="修复登录问题",
+        stats=[("star", "1"), ("eye", "12")],
+    )
+    card.resize(560, 175)
+    card.show()
+    app.processEvents()
+    try:
+        header = card.layout().itemAt(0).layout()
+        widget = header.itemAt(header.count() - 2).widget()
+        assert widget is not None, "统计元素没有加进头部"
+        width = widget.sizeHint().width()
+        assert width <= 96, f"统计元素太宽：{width}px"
+    finally:
+        card.close()
+
+
+def test_github_metrics_quiet() -> None:
+    """非 GitHub 渠道必须安静返回空，不能发请求、不能报错。"""
+    service = GitService()
+    assert service.github_metrics(_StubRemote("local"), None) == {}
+    assert service.github_metrics(_StubRemote("nas"), None) == {}
+
+
 if __name__ == "__main__":
     print("=" * 50)
     check("主窗口创建", test_window_creates)
@@ -239,6 +293,10 @@ if __name__ == "__main__":
     check("角标文案放得下（≤116px）", test_badge_texts_fit)
     check("角标状态与方向映射", test_badge_states)
     check("角标按状态配色（四态四色）", test_badge_colors_per_state)
+    check("star / 浏览量图标画得出来", test_stat_icons)
+    check("热度数字压缩（1.2k / 12.3w）", test_short_number)
+    check("热度元素宽度 ≤96px", test_github_stats_widget_width)
+    check("非 GitHub 渠道不发热度请求", test_github_metrics_quiet)
     print("=" * 50)
     print(f"PASSED {PASSED}  |  FAILED {FAILED}")
     raise SystemExit(0 if FAILED == 0 else 1)

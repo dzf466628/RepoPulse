@@ -349,6 +349,58 @@ def state_key_from_color(color: str) -> str:
     return "waiting"
 
 
+# 卡片右上角的小图标（星标数、浏览量）。用 SVG 画而不是用 ★ / 👁 这类字符：
+# 字符在不同字体下大小和基线都不一样，图标才能保证对齐和细腻。
+GLYPH_SVG = {
+    "star": (
+        '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">'
+        '<path fill="{color}" d="M8 1.4l2 4.2 4.6.6-3.4 3.2.9 4.6L8 11.8 3.9 14l.9-4.6L1.4 6.2 6 5.6z"/>'
+        "</svg>"
+    ),
+    "eye": (
+        '<svg viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg">'
+        '<path fill="none" stroke="{color}" stroke-width="1.4" '
+        'd="M1.3 8S3.9 3.9 8 3.9 14.7 8 14.7 8 12.1 12.1 8 12.1 1.3 8 1.3 8z"/>'
+        '<circle cx="8" cy="8" r="2" fill="{color}"/></svg>'
+    ),
+}
+GLYPH_COLORS = {"star": "#F5C26B", "eye": "#A9B5C8"}
+
+
+def render_glyph_pixmap(kind: str, color: str = "", size: int = 13) -> QPixmap:
+    """画一个卡片用的小图标（star / eye）。"""
+    svg = GLYPH_SVG.get(kind, GLYPH_SVG["star"]).format(color=color or GLYPH_COLORS.get(kind, "#D7DFEB"))
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    renderer.render(painter)
+    painter.end()
+    return pm
+
+
+def _trim_zero(value: float) -> str:
+    text = f"{value:.1f}"
+    return text[:-2] if text.endswith(".0") else text
+
+
+def short_number(value) -> str:
+    """把仓库热度压到 5 个字符以内（1234 → 1.2k，123456 → 12.3w，999999 → 100w）。
+
+    角标旁边就那么大地方，长了会把标题挤到换行，所以这里必须收着写，
+    精确数字放 tooltip。
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if number >= 10000:
+        return f"{_trim_zero(number / 10000)}w"
+    if number >= 1000:
+        return f"{_trim_zero(number / 1000)}k"
+    return str(number)
+
+
 def render_state_pixmap(state: str, color: str, size: int = 12) -> QPixmap:
     svg = STATE_SVG.get(state, STATE_SVG["waiting"]).format(color=color)
     renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
@@ -402,6 +454,8 @@ class StatusCard(QFrame):
         detail_body: str | None = None,
         recent_commit: str = "",
         show_full: bool = False,
+        stats: list[tuple[str, str]] | None = None,
+        stats_tip: str = "",
     ):
         super().__init__()
         self.card_key = key
@@ -463,7 +517,9 @@ class StatusCard(QFrame):
         text_label.setMaximumWidth(116)
         text_label.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         if elided_status != status:
-            self.setToolTip(status)
+            badge_tip = status
+        else:
+            badge_tip = ""
         badge_layout.addWidget(self.status_ring)
         badge_layout.addWidget(text_label)
         title_label.setMinimumWidth(60)
@@ -475,6 +531,23 @@ class StatusCard(QFrame):
             full_icon.setToolTip("全量储存")
             full_icon.setPixmap(render_state_pixmap("full", ACCENT_COLOR, 14))
             header.addWidget(full_icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        if stats:
+            # 放在角标左边：图标 + 短数字，整体不超过 ~90px（标题的空间要留给它）。
+            stats_widget = QFrame()
+            stats_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            stats_layout = QHBoxLayout(stats_widget)
+            stats_layout.setContentsMargins(0, 0, 6, 0)
+            stats_layout.setSpacing(3)
+            for kind, value in stats:
+                icon = QLabel()
+                icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                icon.setPixmap(render_glyph_pixmap(kind, GLYPH_COLORS.get(kind, ""), 13))
+                number = QLabel(value)
+                number.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                number.setStyleSheet("color: #D7DFEB; font-size: 12px; background: transparent;")
+                stats_layout.addWidget(icon)
+                stats_layout.addWidget(number)
+            header.addWidget(stats_widget, 0, Qt.AlignmentFlag.AlignVCenter)
         header.addWidget(status_badge)
         layout.addLayout(header)
 
@@ -515,6 +588,10 @@ class StatusCard(QFrame):
             recent_label.setContentsMargins(0, 0, 0, 0)
             recent_label.setStyleSheet("color: #D7DFEB; padding: 0; margin: 0;")
             layout.addWidget(recent_label)
+
+        # 角标被截断时的完整文案，和 star / 浏览量的精确数字一起挂在卡片 tooltip 上
+        if badge_tip or stats_tip:
+            self.setToolTip(" · ".join(part for part in (badge_tip, stats_tip) if part))
 
         # Keep spare card height below the content, never between the body and recent commit.
         layout.addStretch(1)
@@ -2153,6 +2230,30 @@ class MainWindow(QMainWindow):
             f"冲突：{local.get('conflicts', 0)} 个文件"
         )
 
+    def _github_stats(self, remote, data) -> tuple[list[tuple[str, str]] | None, str]:
+        """GitHub 卡右上角的 star / 浏览量；查不到就返回空（那一块就不显示）。
+
+        只有 GitHub 渠道有这两个数：star 是公开数据，浏览量需要仓库自己的 token，
+        而且 GitHub 只保留最近 14 天 —— 这些都写进 tooltip，别让人以为数据丢了。
+        """
+        if remote.kind != "github":
+            return None, ""
+        metrics = data.get("metrics") or {}
+        stars, views = metrics.get("stars"), metrics.get("views")
+        pairs: list[tuple[str, str]] = []
+        if stars is not None:
+            pairs.append(("star", short_number(stars)))
+        if views is not None:
+            pairs.append(("eye", short_number(views)))
+        if not pairs:
+            return None, ""
+        bits = []
+        if stars is not None:
+            bits.append(f"star {stars}")
+        if views is not None:
+            bits.append(f"近 14 天浏览 {views} 次（独立访客 {metrics.get('uniques', '?')}）")
+        return pairs, " · ".join(bits)
+
     def _build_remote_card(self, key: str, remote: RemoteConfig, data: dict | None) -> StatusCard:
         title = remote.label or {
             "local": "Local Repository · 本地 Git",
@@ -2208,6 +2309,7 @@ class MainWindow(QMainWindow):
             html.escape(f"提交时间：{last.get('date', '未知')}"),
         ])
         body = "<br>".join(body_lines)
+        stats, stats_tip = self._github_stats(remote, data)
         return StatusCard(
             key,
             title,
@@ -2218,6 +2320,8 @@ class MainWindow(QMainWindow):
             rich_body=True,
             recent_commit=str(last.get("subject", "未知")),
             show_full=show_full,
+            stats=stats,
+            stats_tip=stats_tip,
         )
 
     def _channel_address(self, remote: RemoteConfig, project: ProjectConfig | None) -> str:

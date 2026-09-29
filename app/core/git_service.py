@@ -9,6 +9,7 @@ import shutil
 import stat
 import subprocess
 import threading
+import time
 import base64
 import json
 import urllib.error
@@ -103,6 +104,12 @@ Thumbs.db
 *.tmp
 *.bak
 """
+
+
+# GitHub 的 star / 浏览量缓存：卡片每轮刷新都会问一次，但这两个数不会秒变，
+# 浏览量接口还受频率限制，所以 30 分钟内只真正查一次。
+_GITHUB_METRICS_TTL = 30 * 60
+_github_metrics_cache: dict[str, tuple[float, dict]] = {}
 
 
 class GitService:
@@ -357,6 +364,52 @@ class GitService:
         if base.name.casefold() == project.name.casefold() and (base / ".git").is_dir():
             base = base.parent
         return base / project.name
+
+    def _github_slug(self, remote: RemoteConfig, project: ProjectConfig) -> tuple[str, str] | None:
+        """从渠道地址（或账号 + 项目名）里取出 owner / repo，供 API 调用。"""
+        match = re.match(r"https?://[^/]+/([^/]+)/([^/]+?)(?:\.git)?/?$", (remote.url or "").strip())
+        if match:
+            return match.group(1), match.group(2)
+        owner = (remote.username or "").strip()
+        name = (project.name or "").strip()
+        if owner and name:
+            return owner, name
+        return None
+
+    def github_metrics(self, remote: RemoteConfig, project: ProjectConfig, refresh: bool = False) -> dict:
+        """取 GitHub 仓库的 star 数和近 14 天浏览量。
+
+        star 是公开数据；浏览量只有仓库自己的 token 能查，而且 GitHub 只保留 14 天，
+        更早的拿不回来（这是 GitHub 的规矩，不是软件的问题）。两个数都不会秒变，
+        所以结果缓存 30 分钟，避免每轮刷新都打接口。查不到一律返回空，界面上不显示。
+        """
+        if remote.kind != "github":
+            return {}
+        slug = self._github_slug(remote, project)
+        if slug is None:
+            return {}
+        key = f"{slug[0]}/{slug[1]}"
+        now = time.time()
+        cached = _github_metrics_cache.get(key)
+        if cached and not refresh and now - cached[0] < _GITHUB_METRICS_TTL:
+            return cached[1]
+        metrics: dict = {"stars": None, "views": None, "uniques": None}
+        try:
+            info = self._request_json(f"https://api.github.com/repos/{key}", remote)
+            if isinstance(info, dict):
+                metrics["stars"] = info.get("stargazers_count")
+        except GitCommandError as exc:
+            self.log(f"取 {key} 的 star 数失败：{exc}")
+        try:
+            traffic = self._request_json(f"https://api.github.com/repos/{key}/traffic/views", remote)
+            if isinstance(traffic, dict):
+                metrics["views"] = traffic.get("count")
+                metrics["uniques"] = traffic.get("uniques")
+        except GitCommandError:
+            # 没配 token、或 token 没有这个仓库的权限时查不到浏览量，属于正常情况
+            pass
+        _github_metrics_cache[key] = (now, metrics)
+        return metrics
 
     def _request_json(
         self,
@@ -1079,6 +1132,9 @@ class GitService:
                 }
             else:
                 remotes[key] = self.remote_status(project, remote, local, key)
+                if remote.kind == "github" and not remotes[key].get("error"):
+                    # 卡片右上角的 star / 浏览量：连得上才去问，查不到就不显示
+                    remotes[key]["metrics"] = self.github_metrics(remote, project)
                 if (
                     remote.kind == "github"
                     and remotes[key].get("error")
