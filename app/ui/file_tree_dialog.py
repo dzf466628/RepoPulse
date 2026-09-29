@@ -18,9 +18,10 @@ from PyQt6.QtCore import (
     QSize,
     Qt,
     QThread,
+    pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QCursor, QPainter, QPainterPath
+from PyQt6.QtGui import QColor, QCursor, QPainter, QPainterPath, QPixmap, QBrush, QPen
 from PyQt6.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -88,7 +89,7 @@ class ToggleSwitch(QWidget):
         self._thumb_x = value
         self.update()
 
-    thumb_pos = property(get_thumb_pos, set_thumb_pos)
+    thumb_pos = pyqtProperty(float, get_thumb_pos, set_thumb_pos)
 
     def isChecked(self) -> bool:
         return self._checked
@@ -137,17 +138,28 @@ class ToggleSwitch(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         alpha = DISABLED_ALPHA if self._disabled else 1.0
+        w, h = self.width(), self.height()
+        radius = h / 2
+        # 轨道背景
         track = QColor(self._track_color)
         track.setAlphaF(track.alphaF() * alpha)
-        radius = self.height() / 2
-        path = QPainterPath()
-        path.addRoundedRect(0, 0, self.width(), self.height(), radius, radius)
-        painter.fillPath(path, track)
-        thumb_size = self.height() - 4
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(track)
+        painter.drawRoundedRect(0, 0, w, h, int(radius), int(radius))
+        # 关闭状态画边框，让轨道左右边界清晰可见
+        if not self._checked:
+            border = QColor("#4A6578")
+            border.setAlphaF(alpha)
+            pen = QPen(border, 1)
+            painter.setPen(pen)
+            painter.setBrush(Qt.GlobalColor.transparent)
+            painter.drawRoundedRect(0, 0, w - 1, h - 1, int(radius), int(radius))
+        # 滑块
+        thumb_size = h - 4
         thumb = QColor(THUMB_COLOR)
         thumb.setAlphaF(alpha)
-        painter.setBrush(thumb)
         painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(thumb)
         painter.drawEllipse(int(self._thumb_x), 2, int(thumb_size), int(thumb_size))
         painter.end()
 
@@ -166,6 +178,90 @@ class FileTreeLoadThread(QThread):
             self.loaded.emit(tree)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
+
+
+def _make_file_icon(name: str, is_dir: bool) -> QIcon:
+    """按文件类型绘制 22x22 图标：文件夹青色，文件按扩展名配色。"""
+    from PyQt6.QtGui import QIcon
+    pm = QPixmap(22, 22)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    if is_dir:
+        # 文件夹：青色
+        p.setBrush(QBrush(QColor(ACCENT_COLOR)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(2, 6, 18, 13, 2, 2)
+        p.drawRoundedRect(2, 3, 9, 5, 1, 1)
+        p.setBrush(QBrush(QColor(0, 0, 0, 40)))
+        p.drawRoundedRect(2, 16, 18, 3, 1, 1)
+    else:
+        # 文件：白色文档 + 底部颜色条
+        ext = Path(name.lower()).suffix
+        color_map = {
+            ".py": "#5B9BD5", ".js": "#F7DF1E", ".ts": "#3178C6",
+            ".html": "#E44D26", ".css": "#264DE4", ".scss": "#CD6799",
+            ".json": "#70D6A5", ".yaml": "#70D6A5", ".yml": "#70D6A5",
+            ".toml": "#70D6A5", ".ini": "#70D6A5", ".cfg": "#70D6A5",
+            ".md": "#F5C26B", ".txt": "#F5C26B", ".rst": "#F5C26B",
+            ".png": "#B48EAD", ".jpg": "#B48EAD", ".jpeg": "#B48EAD",
+            ".gif": "#B48EAD", ".svg": "#B48EAD", ".ico": "#B48EAD",
+            ".exe": "#F27788", ".dll": "#F27788", ".pyd": "#F27788",
+            ".zip": "#F5A623", ".tar": "#F5A623", ".gz": "#F5A623",
+            ".log": "#8A97AA", ".tmp": "#8A97AA", ".bak": "#8A97AA",
+            ".bat": "#4EC9B0", ".ps1": "#4EC9B0", ".sh": "#4EC9B0",
+            ".spec": "#CE9178", ".iss": "#CE9178",
+        }
+        bar_color = QColor(color_map.get(ext, "#8A97AA"))
+        # 文档主体
+        p.setBrush(QBrush(QColor("#E8F0F5")))
+        p.setPen(QPen(QColor("#5A7A8A"), 1))
+        p.drawRoundedRect(4, 1, 14, 19, 2, 2)
+        # 底部颜色条
+        p.setBrush(QBrush(bar_color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(4, 16, 14, 4, 1, 1)
+    p.end()
+    return QIcon(pm)
+
+
+def _make_star_icon() -> QIcon:
+    """画一个青色星星/魔法棒符号，用于'按推荐设置'按钮。"""
+    from PyQt6.QtGui import QIcon, QPolygonF
+    from PyQt6.QtCore import QPointF
+    import math
+    pm = QPixmap(20, 20)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setBrush(QBrush(QColor("#071D2C")))
+    p.setPen(Qt.PenStyle.NoPen)
+    # 五角星
+    cx, cy, r_outer, r_inner = 10, 10.5, 8, 3.5
+    poly = QPolygonF()
+    for i in range(10):
+        angle = math.pi / 2 + i * math.pi / 5
+        r = r_outer if i % 2 == 0 else r_inner
+        poly.append(QPointF(cx + r * math.cos(angle), cy - r * math.sin(angle)))
+    p.drawPolygon(poly)
+    p.end()
+    return QIcon(pm)
+
+
+def _make_search_icon() -> QIcon:
+    """放大镜符号，用于搜索框。"""
+    from PyQt6.QtGui import QIcon
+    pm = QPixmap(20, 20)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor("#C8D8E8"), 2)
+    p.setPen(pen)
+    p.setBrush(Qt.GlobalColor.transparent)
+    p.drawEllipse(3, 3, 10, 10)
+    p.drawLine(12, 12, 17, 17)
+    p.end()
+    return QIcon(pm)
 
 
 class FileTreeDialog(QDialog):
@@ -189,7 +285,8 @@ class FileTreeDialog(QDialog):
 
     def _build_ui(self) -> None:
         self.setWindowTitle("暂存区文件管理")
-        self.setMinimumSize(680, 560)
+        self.setMinimumSize(500, 480)
+        self.resize(500, 600)
         self.setStyleSheet(f"background-color: {CANVAS_COLOR}; color: #E8F0F5;")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE_4, SPACE_4, SPACE_4, SPACE_4)
@@ -198,22 +295,21 @@ class FileTreeDialog(QDialog):
         top = QHBoxLayout()
         top.setSpacing(SPACE_2)
         title = QLabel(f"文件跟踪管理 — {self._project_name or self._service.root.name}")
-        title.setStyleSheet("font-size: 14px; font-weight: 600; color: #E8F0F5;")
+        title.setStyleSheet("font-size: 15px; font-weight: 700; color: #F4F7FB;")
+        title.setMinimumWidth(0)
+        title.setMaximumWidth(240)
         top.addWidget(title)
         top.addStretch()
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("搜索文件名…")
-        self._search.setFixedWidth(180)
+        self._search.setMinimumWidth(140)
+        self._search.setMaximumWidth(220)
         self._search.setStyleSheet(self._input_style())
+        self._search.setClearButtonEnabled(True)
+        search_action = self._search.addAction(_make_search_icon(), QLineEdit.ActionPosition.LeadingPosition)
         self._search.textChanged.connect(self._apply_filter)
         top.addWidget(self._search)
-
-        btn_rec = QPushButton("按推荐设置")
-        btn_rec.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_rec.setStyleSheet(self._button_style(ACCENT_COLOR))
-        btn_rec.clicked.connect(self._apply_recommendations)
-        top.addWidget(btn_rec)
         layout.addLayout(top)
 
         hint = QLabel("开关打开 = 纳入 git 同步；关闭 = 写入 .gitignore（文件保留在磁盘）。灰色开关不可操作。")
@@ -226,14 +322,17 @@ class FileTreeDialog(QDialog):
         self._tree.setHeaderLabels(["名称", "大小", "建议", ""])
         self._tree.setRootIsDecorated(True)
         self._tree.setUniformRowHeights(True)
-        self._tree.setIconSize(QSize(18, 18))
+        self._tree.setIconSize(QSize(22, 22))
         self._tree.setStyleSheet(self._tree_style())
         header = self._tree.header()
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(self.COLS_NAME, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(self.COLS_SIZE, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(self.COLS_HINT, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(self.COLS_TOGGLE, QHeaderView.ResizeMode.ResizeToContents)
-        self._tree.setIndentation(20)
+        header.setSectionResizeMode(self.COLS_HINT, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(self.COLS_TOGGLE, QHeaderView.ResizeMode.Fixed)
+        header.resizeSection(self.COLS_HINT, 92)
+        header.resizeSection(self.COLS_TOGGLE, 56)
+        self._tree.setIndentation(18)
         self._tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._tree.customContextMenuRequested.connect(self._show_tree_menu)
         layout.addWidget(self._tree, 1)
@@ -244,11 +343,32 @@ class FileTreeDialog(QDialog):
         layout.addWidget(self._loading_label)
         self._tree.hide()
 
+        # 图标颜色图例
+        legend = QLabel(
+            '<span style="color:#8A97AA;font-size:10px;">图标颜色：'
+            '<span style="color:#5B9BD5;">■</span>代码 '
+            '<span style="color:#70D6A5;">■</span>配置 '
+            '<span style="color:#F5C26B;">■</span>文档 '
+            '<span style="color:#B48EAD;">■</span>图片 '
+            '<span style="color:#F27788;">■</span>可执行 '
+            '<span style="color:#F5A623;">■</span>压缩 '
+            '<span style="color:#8A97AA;">■</span>其他 '
+            '<span style="color:#16E5EE;">■</span>文件夹</span>'
+        )
+        legend.setStyleSheet("color: #8A97AA; font-size: 10px;")
+        layout.addWidget(legend)
+
         bottom = QHBoxLayout()
         self._stats = QLabel("")
         self._stats.setStyleSheet("color: #8A97AA; font-size: 11px;")
         bottom.addWidget(self._stats)
         bottom.addStretch()
+        btn_rec = QPushButton("按推荐设置")
+        btn_rec.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        btn_rec.setStyleSheet(self._button_style(PANEL_RAISED))
+        btn_rec.setToolTip("推荐的打开，不推荐的关闭")
+        btn_rec.clicked.connect(self._apply_recommendations)
+        bottom.addWidget(btn_rec)
         btn_cancel = QPushButton("取消")
         btn_cancel.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_cancel.setStyleSheet(self._button_style(BORDER_COLOR))
@@ -276,7 +396,7 @@ class FileTreeDialog(QDialog):
         text_color = "#071D2C" if is_accent else "#E8F0F5"
         return (
             f"QPushButton {{ background: {color}; border: none; border-radius: 6px;"
-            f" padding: 7px 18px; color: {text_color}; font-size: 12px; font-weight: 600; }}"
+            f" padding: 6px 14px; color: {text_color}; font-size: 12px; font-weight: 600; }}"
             f"QPushButton:hover {{ background: {ACCENT_HOVER if is_accent else PANEL_RAISED}; }}"
             f"QPushButton:disabled {{ background: #2A3F4D; color: #6B7B8D; }}"
         )
@@ -285,8 +405,8 @@ class FileTreeDialog(QDialog):
     def _tree_style() -> str:
         return (
             f"QTreeWidget {{ background: {PANEL_COLOR}; border: 1px solid {BORDER_COLOR};"
-            f" border-radius: 8px; font-size: 12px; }}"
-            f"QTreeWidget::item {{ padding: 3px 0; }}"
+            f" border-radius: 8px; font-size: 13px; }}"
+            f"QTreeWidget::item {{ padding: 2px 0; min-height: 28px; }}"
             f"QTreeWidget::item:selected {{ background: {PANEL_RAISED}; }}"
             f"QTreeWidget::branch {{ background: {PANEL_COLOR}; }}"
             f"QHeaderView::section {{ background: {PANEL_RAISED}; color: #8A97AA;"
@@ -301,14 +421,18 @@ class FileTreeDialog(QDialog):
         self._load_thread.start()
 
     def _on_tree_loaded(self, root: FileNode) -> None:
+        if not self.isVisible():
+            return  # 用户已关闭对话框，忽略加载结果
         self._root_node = root
         self._loading_label.hide()
         self._tree.show()
         self._populate_tree(root)
+        # 数据填充后强制重设固定列宽（填充过程可能重置列宽）
+        self._tree.header().resizeSection(self.COLS_HINT, 92)
+        self._tree.header().resizeSection(self.COLS_TOGGLE, 56)
         self._loading = False
         self._btn_save.setEnabled(True)
         self._update_stats()
-        self._tree.expandToDepth(0)
 
     def _on_load_failed(self, error: str) -> None:
         self._loading_label.setText(f"扫描失败：{error}")
@@ -328,19 +452,18 @@ class FileTreeDialog(QDialog):
             self._tree.addTopLevelItem(item)
         item.setData(self.COLS_NAME, ROLE_PATH, node.rel_path)
 
-        from PyQt6.QtWidgets import QStyle
-        style = self.style()
-        if node.is_dir:
-            icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
-        else:
-            icon = style.standardIcon(QStyle.StandardPixmap.SP_FileIcon)
-        item.setIcon(self.COLS_NAME, icon)
+        item.setIcon(self.COLS_NAME, _make_file_icon(node.name, node.is_dir))
         item.setText(self.COLS_NAME, node.name)
         tip = node.rel_path
         if node.collapsed_large:
             tip += "\n大目录，不展开显示子文件"
         if node.disabled_reason:
-            tip += f"\n{node.disabled_reason}"
+            full_reason = node.disabled_reason
+            if node.rule_ignored:
+                full_reason = "由 .gitignore 通配符规则（如 *.log）忽略，开关无法单独控制"
+            if node.disabled_reason == "空目录":
+                full_reason = "空目录不被 git 跟踪，可放入 .gitkeep 文件使其被跟踪"
+            tip += f"\n{full_reason}"
         item.setToolTip(self.COLS_NAME, tip)
         item.setText(self.COLS_SIZE, node.display_size)
         item.setTextAlignment(self.COLS_SIZE, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -352,17 +475,19 @@ class FileTreeDialog(QDialog):
 
         toggle = ToggleSwitch(checked=node.checked)
         if node.disabled:
+            toggle.setChecked(False)
             toggle.setDisabledState(True)
             item.setForeground(self.COLS_NAME, QColor(COLOR_DISABLED))
         toggle.toggled.connect(lambda checked, p=node.rel_path: self._on_toggle(p, checked))
-        self._tree.setItemWidget(item, self.COLS_TOGGLE, toggle)
-
-        if node.is_dir and not node.children and not node.disabled:
-            toggle.setDisabledState(True)
-            item.setForeground(self.COLS_NAME, QColor(COLOR_DISABLED))
-            item.setText(self.COLS_HINT, "空目录")
-            item.setForeground(self.COLS_HINT, QColor(COLOR_DISABLED))
-            item.setToolTip(self.COLS_NAME, tip + "\n空目录不被 git 跟踪，可放入 .gitkeep 文件")
+        # 右对齐容器
+        toggle_container = QWidget()
+        toggle_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        toggle_container.setAutoFillBackground(False)
+        cl = QHBoxLayout(toggle_container)
+        cl.setContentsMargins(0, 0, 6, 0)
+        cl.addStretch()
+        cl.addWidget(toggle)
+        self._tree.setItemWidget(item, self.COLS_TOGGLE, toggle_container)
 
         self._node_map[node.rel_path] = node
         self._switch_map[node.rel_path] = toggle
@@ -461,7 +586,6 @@ class FileTreeDialog(QDialog):
                 top = self._tree.topLevelItem(i)
                 top.setHidden(False)
                 self._set_subtree_hidden(top, False)
-            self._tree.expandToDepth(0)
             return
         for i in range(self._tree.topLevelItemCount()):
             self._filter_item(self._tree.topLevelItem(i), keyword)

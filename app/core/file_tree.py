@@ -216,7 +216,7 @@ class FileTreeService:
             if node.rel_path in wildcard_paths and not node.disabled:
                 node.rule_ignored = True
                 node.disabled = True
-                node.disabled_reason = "由 .gitignore 规则忽略"
+                node.disabled_reason = "规则忽略"
             for child in node.children:
                 mark(child)
 
@@ -267,7 +267,7 @@ class FileTreeService:
                 node.recommendation = self._recommend_file(name, size)
                 if size >= LARGE_FILE_LIMIT:
                     node.disabled = True
-                    node.disabled_reason = "超过 100MB"
+                    node.disabled_reason = "大文件"
                     node.recommendation = "avoid"
                 parent_node.children.append(node)
 
@@ -282,6 +282,8 @@ class FileTreeService:
     def _apply_dir_state(self, node: FileNode) -> None:
         """根据子节点推断文件夹状态。"""
         if not node.children:
+            node.disabled = True
+            node.disabled_reason = "空目录"
             node.recommendation = "neutral"
             return
         node.tracked = any(c.tracked for c in node.children)
@@ -350,6 +352,25 @@ class FileTreeService:
                 user_lines.append(line)
         return user_lines, managed_lines
 
+    @staticmethod
+    def _dedup_changes(changes: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+        """过滤被祖先文件夹同向变更覆盖的冗余子项。"""
+        norm = [(p.replace("\\", "/").strip("/"), v) for p, v in changes if p.replace("\\", "/").strip("/")]
+        result = []
+        for p, v in norm:
+            if not v:
+                # 若某祖先文件夹也在本次变更中被关闭，则本子项被覆盖，跳过
+                parts = p.split("/")
+                redundant = False
+                for i in range(1, len(parts)):
+                    if ("/".join(parts[:i]), False) in norm:
+                        redundant = True
+                        break
+                if redundant:
+                    continue
+            result.append((p, v))
+        return result
+
     def apply_changes(self, changes: list[tuple[str, bool]]) -> dict:
         """批量应用开关变更。
 
@@ -357,6 +378,7 @@ class FileTreeService:
           should_track=True  → 从管理区块移除忽略规则
           should_track=False → 写入忽略规则，已跟踪文件执行 git rm --cached
         """
+        changes = self._dedup_changes(changes)
         untracked: list[str] = []
         tracked: list[str] = []
         errors: list[str] = []
@@ -407,6 +429,7 @@ class FileTreeService:
 
     def preview_changes(self, changes: list[tuple[str, bool]]) -> tuple[list[str], list[str]]:
         """预览 .gitignore 变更，返回 (新增规则, 移除规则)。"""
+        changes = self._dedup_changes(changes)
         _, managed = self._parse_gitignore()
         managed_set = set(managed)
         added: list[str] = []

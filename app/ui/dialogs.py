@@ -1,4 +1,4 @@
-﻿# Copyright (C) 2026 dudu <https://duadu.cc>
+# Copyright (C) 2026 dudu <https://duadu.cc>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ def confirm_delete_dialog(
     box.exec()
     return box.clickedButton() is yes
 from app.models import ProjectConfig, RemoteConfig
-from app.ui.theme import ACCENT_COLOR, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
+from app.ui.theme import ACCENT_COLOR, ACCENT_HOVER, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
 
 
 # ------------------------------------------------------------ Jelly 复选框
@@ -561,7 +561,8 @@ class RepositoryDetailDialog(QDialog):
         files_button = QPushButton("文件管理")
         files_button.setFixedHeight(30)
         files_button.setStyleSheet(
-            f"QPushButton {{ background: {ACCENT_COLOR}; color: #071D2C; font-weight: 700; padding: 0 14px; border: none; border-radius: 5px; }}"
+            f"QPushButton {{ background: {ACCENT_COLOR}; color: #071D2C; font-weight: 700;"
+            f" border: 1px solid {ACCENT_COLOR}; border-radius: 4px; padding: 6px 12px; }}"
             f"QPushButton:hover {{ background: {ACCENT_HOVER}; }}"
         )
         files_button.setCursor(Qt.CursorShape.PointingHandCursor)
