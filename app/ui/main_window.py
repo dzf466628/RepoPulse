@@ -533,21 +533,23 @@ class StatusCard(QFrame):
             header.addWidget(full_icon, 0, Qt.AlignmentFlag.AlignVCenter)
         if stats:
             # 放在角标左边：图标 + 短数字，整体不超过 ~90px（标题的空间要留给它）。
-            stats_widget = QFrame()
-            stats_widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            stats_layout = QHBoxLayout(stats_widget)
-            stats_layout.setContentsMargins(0, 0, 6, 0)
-            stats_layout.setSpacing(3)
+            # 故意不套容器控件：主题里有 QWidget { background: #071D2C; } 这条全局规则，
+            # 任何裸 QFrame / QWidget 都会被刷成窗口底色，在卡片上就是一块近黑的框
+            # （真踩过这个坑）。主题里另有 QLabel { background: transparent; }，
+            # 标签天生安全，所以直接把图标和数字加进头部布局。
             for kind, value in stats:
                 icon = QLabel()
                 icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 icon.setPixmap(render_glyph_pixmap(kind, GLYPH_COLORS.get(kind, ""), 13))
+                icon.setFixedWidth(14)
+                icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 number = QLabel(value)
                 number.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 number.setStyleSheet("color: #D7DFEB; font-size: 12px; background: transparent;")
-                stats_layout.addWidget(icon)
-                stats_layout.addWidget(number)
-            header.addWidget(stats_widget, 0, Qt.AlignmentFlag.AlignVCenter)
+                header.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
+                header.addWidget(number, 0, Qt.AlignmentFlag.AlignVCenter)
+                header.addSpacing(6)
+            header.addSpacing(2)
         header.addWidget(status_badge)
         layout.addLayout(header)
 
@@ -4009,5 +4011,4 @@ class MainWindow(QMainWindow):
         self.store.save(self.projects)
         self._append_log(f"已更新渠道配置：{new_remote.label or key}")
         self.refresh_selected(show_dialog=False)
-
 
