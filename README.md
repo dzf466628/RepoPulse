@@ -20,7 +20,6 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 
 项目太多，不知道哪份是最新的 → 远端太散，每次都要手动确认 → 打开 RepoPulse，**一眼看到该做什么**。
 
-![RepoPulse 主窗口](docs/images/repopulse-app.png)
 
 ---
 
@@ -34,7 +33,6 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 - 状态卡显示 branch、commit、修改数
 - 点击仓库即可打开目标位置或终端
 
-![项目列表](docs/images/repopulse-projects.png)
 
 ### 渠道状态 — 本地、NAS、GitHub，同一条时间线
 
@@ -44,7 +42,6 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 - SSH、HTTPS 与令牌认证分开处理
 - GitHub 失败可以按策略忽略，不阻塞其他渠道
 
-![仓库状态卡](docs/images/repopulse-cards.png)
 
 ### 同步动作 — 把同步变成一个可确认的流程
 
@@ -54,7 +51,6 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 - 拉取到本地：先确认远端结果再更新
 - 后台完成后通过托盘通知结果
 
-![快捷控制区](docs/images/repopulse-actions.png)
 
 ### 托盘悬浮 — 放到托盘里，让状态自己更新
 
@@ -64,7 +60,6 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 - 拖出后独立置顶，拖回槽位跟随主窗口收起
 - 不用打开主窗口也能一键同步
 
-![悬浮状态窗](docs/images/repopulse-floating-clean.png)
 
 ---
 
