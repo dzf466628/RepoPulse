@@ -1,4 +1,4 @@
-# Copyright (C) 2026 dudu <https://duadu.cc>
+﻿# Copyright (C) 2026 dudu <https://duadu.cc>
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
     QStackedWidget,
@@ -1617,3 +1618,121 @@ class GitDialog(QDialog):
         scheme = parsed.scheme if parsed.scheme in {"http", "https"} else "http"
         display_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
         return f"{scheme}://{display_host}:{effective_port}"
+
+
+class DivergeResolveDialog(QDialog):
+    """仓库已分叉时让用户选择处理策略。
+
+    四个选项：合并 / 变基 / 用本地覆盖远程 / 用远程覆盖本地。
+    force 类选项点确认后会弹二次确认，避免误操作丢提交。
+    """
+
+    STRATEGIES = [
+        ("merge", "合并两边改动（推荐）",
+         "生成一个合并提交，本地和远程的历史都保留，最安全。"),
+        ("rebase", "把本地改动挪到远程最新之上",
+         "历史更线性干净，但本地提交较多时冲突可能更频繁。"),
+        ("force_local", "用本地覆盖远程（危险）",
+         "远程上领先的提交会被覆盖，不可恢复。"),
+        ("force_remote", "用远程覆盖本地（危险）",
+         "本地领先的提交会被覆盖，不可恢复。"),
+    ]
+
+    def __init__(
+        self,
+        diverged_remotes: list[dict],
+        entry: str = "sync",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.diverged_remotes = diverged_remotes
+        self.entry = entry
+        self.setWindowTitle("仓库已分叉")
+        self.setMinimumWidth(480)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(SPACE_4, SPACE_4, SPACE_4, SPACE_4)
+        layout.setSpacing(SPACE_2)
+
+        # 分叉摘要
+        summary_lines = []
+        for r in self.diverged_remotes:
+            summary_lines.append(
+                f"{r['label']}：本地领先 {r['ahead']} 步 / 远程领先 {r['behind']} 步"
+            )
+        summary = QLabel("\n".join(summary_lines))
+        summary.setStyleSheet("color: #F5C26B; font-size: 13px; font-weight: 600;")
+        layout.addWidget(summary)
+
+        hint = QLabel("两边都有对方没有的提交，请选择处理方式：")
+        hint.setStyleSheet("color: #A9B5C8;")
+        layout.addWidget(hint)
+
+        # 四个单选选项
+        self.radio_buttons: dict[str, QRadioButton] = {}
+        for key, title, desc in self.STRATEGIES:
+            btn = QRadioButton(f"{title}\n  {desc}")
+            color = "#FF8A80" if key.startswith("force") else "#E8ECF2"
+            btn.setStyleSheet(
+                f"QRadioButton {{ color: {color}; padding: 6px 0; spacing: 8px; }}"
+                f"QRadioButton::indicator {{ width: 16px; height: 16px; }}"
+            )
+            if key == "merge":
+                btn.setChecked(True)
+            self.radio_buttons[key] = btn
+            layout.addWidget(btn)
+
+        layout.addStretch()
+
+        # 底部按钮
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        ok_btn.setText("确认执行")
+        ok_btn.setStyleSheet(
+            "QPushButton { background: #0B6B7A; color: white; border: 1px solid #16E5EE;"
+            " border-radius: 4px; padding: 6px 16px; font-weight: 700; }"
+            "QPushButton:hover { background: #16E5EE; color: #071D2C; }"
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_accept(self) -> None:
+        strategy = self.selected_strategy()
+        if strategy not in ("force_local", "force_remote"):
+            self.accept()
+            return
+        # force 操作二次确认
+        if strategy == "force_local":
+            total = sum(r["behind"] for r in self.diverged_remotes)
+            text = f"确定要用本地覆盖远程吗？\n远程上 {total} 个提交将被覆盖，不可恢复。"
+        else:
+            total = sum(r["ahead"] for r in self.diverged_remotes)
+            text = f"确定要用远程覆盖本地吗？\n本地 {total} 个提交将被覆盖，不可恢复。"
+        box = QMessageBox(self)
+        box.setWindowTitle("危险操作确认")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(text)
+        box.setStyleSheet("QLabel { color: #FF8A80; font-size: 13px; font-weight: 600; }")
+        yes = box.addButton("确认覆盖", QMessageBox.ButtonRole.DestructiveRole)
+        cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        yes.setStyleSheet(
+            "QPushButton { background: #C62828; color: white; border: none;"
+            " border-radius: 4px; padding: 6px 16px; font-weight: 700; }"
+            "QPushButton:hover { background: #E53935; }"
+        )
+        box.setDefaultButton(cancel)
+        box.setEscapeButton(cancel)
+        box.exec()
+        if box.clickedButton() is yes:
+            self.accept()
+
+    def selected_strategy(self) -> str:
+        for key, btn in self.radio_buttons.items():
+            if btn.isChecked():
+                return key
+        return "merge"

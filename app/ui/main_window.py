@@ -57,7 +57,8 @@ from app.core.updater import UPDATE_URL, UpdateCheckThread
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
 from app.ui.dialogs import (
-    GitDialog, JellyCheckBox, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog, confirm_delete_dialog,
+    DivergeResolveDialog, GitDialog, JellyCheckBox, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog,
+    confirm_delete_dialog,
 )
 from app.ui.update_dialog import UpdateDownloadDialog
 from app.ui.floating_widget import DockSlot, FloatingStatusWidget, ProgressRing
@@ -76,10 +77,13 @@ from app.ui.theme import (
     set_dark_title_bar,
 )
 from app.workers import (
+    DivergeResolveWorker,
     LocalStatusWorker,
     ProjectCreateWorker,
     ProjectDeleteWorker,
     PullWorker,
+    SingleChannelWorker,
+    SingleRefreshWorker,
     StatusWorker,
     SyncWorker,
 )
@@ -135,9 +139,9 @@ class BusyDialog(QDialog):
         self._timer.setInterval(320)
         self._timer.timeout.connect(self._animate)
 
-        title = QLabel("请等待")
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet(
+        self.title_label = QLabel("请等待")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.title_label.setStyleSheet(
             f"color: {ACCENT_COLOR}; font-size: 18px; font-weight: 700;"
         )
         self.message_label = QLabel()
@@ -168,7 +172,7 @@ class BusyDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(SPACE_3, SPACE_2, SPACE_3, SPACE_2)
         layout.setSpacing(SPACE_1)
-        layout.addWidget(title)
+        layout.addWidget(self.title_label)
         layout.addWidget(self.message_label)
         layout.addWidget(self.detail_label)
         layout.addWidget(self.progress)
@@ -176,16 +180,18 @@ class BusyDialog(QDialog):
             f"QDialog {{ background: {PANEL_COLOR}; border: 1px solid {ACCENT_DARK}; border-radius: 12px; }}"
         )
 
+    def set_title(self, title: str) -> None:
+        self.title_label.setText(title or "请等待")
+
     def set_message(self, message: str) -> None:
         self._message = (message.strip() or "正在处理")[:48]
         self._dot_count = 0
         self._animate()
 
     def set_detailed_progress(self, task_name: str, current: int, total: int, detail: str) -> None:
-        """设置详细进度"""
+        """设置详细进度。不覆盖 message_label（操作描述），只更新具体任务和进度条。"""
         self._timer.stop()  # 停止动画
-        self.message_label.setText(task_name)
-        self.detail_label.setText(detail)
+        self.detail_label.setText(task_name if not detail else f"{task_name} · {detail}")
         self.detail_label.show()
         if total > 0:
             self.progress.setRange(0, total)
@@ -317,6 +323,7 @@ class DragPreview(QWidget):
 
 class StatusCard(QFrame):
     clicked = pyqtSignal(str)
+    context_menu_requested = pyqtSignal(str, QPoint)
     drag_started = pyqtSignal(str)
     drag_finished = pyqtSignal(str, QPoint)
     drag_moved = pyqtSignal(str, QPoint)
@@ -534,6 +541,9 @@ class StatusCard(QFrame):
             self._press_pos = None
             self._dragging = False
         super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event) -> None:  # noqa: N802 - Qt API
+        self.context_menu_requested.emit(self.card_key, event.globalPos())
 
 
 class ProjectListWidget(QListWidget):
@@ -834,6 +844,9 @@ class MainWindow(QMainWindow):
         self.pull_worker: PullWorker | None = None
         self.create_worker: ProjectCreateWorker | None = None
         self.local_status_worker: LocalStatusWorker | None = None
+        self.diverge_worker: DivergeResolveWorker | None = None
+        self.single_channel_worker: SingleChannelWorker | None = None
+        self.single_refresh_worker: SingleRefreshWorker | None = None
         self.quick_buttons: list[QPushButton] = []
         self.card_widgets: dict[str, StatusCard] = {}
         self.selected_git_key: str | None = None
@@ -1894,6 +1907,7 @@ class MainWindow(QMainWindow):
 
     def _add_card(self, key: str, card: StatusCard, index: int) -> None:
         card.clicked.connect(self._select_card)
+        card.context_menu_requested.connect(self._show_card_context_menu)
         card.drag_started.connect(self._start_card_drag)
         card.drag_finished.connect(self._finish_card_drag)
         self.card_widgets[key] = card
@@ -2270,6 +2284,13 @@ class MainWindow(QMainWindow):
             if project is not None:
                 if self.sync_worker and self.sync_worker.isRunning():
                     self._append_log("同步进行中，请稍后再拉取。")
+                    return
+                diverged = self._find_diverged_remotes(project)
+                if diverged:
+                    dialog = DivergeResolveDialog(diverged, entry="pull", parent=self)
+                    if not dialog.exec():
+                        return
+                    self._start_diverge_resolve(project, diverged, dialog.selected_strategy(), entry="pull")
                     return
                 self._show_busy_dialog("正在拉取最新提交")
                 self.pull_worker = PullWorker(project)
@@ -2694,6 +2715,15 @@ class MainWindow(QMainWindow):
             has_changes = (not is_uncreated) and any(
                 local.get(key, 0) for key in ("staged", "modified", "untracked", "conflicts")
             )
+        # 分叉检测：有任意远程 ahead>0 且 behind>0 时先弹选择框，不硬 push
+        diverged = self._find_diverged_remotes(project)
+        if diverged:
+            dialog = DivergeResolveDialog(diverged, entry="sync", parent=self)
+            if not dialog.exec():
+                return
+            self._start_diverge_resolve(project, diverged, dialog.selected_strategy(), entry="sync")
+            return
+
         commit_message = ""
         if has_changes:
             if quick:
@@ -2754,6 +2784,14 @@ class MainWindow(QMainWindow):
             self._append_log("同步进行中，请稍后再拉取。")
             return
         telemetry.track("拉取更新")
+        # 分叉检测：拉取前先让用户选怎么处理
+        diverged = self._find_diverged_remotes(project)
+        if diverged:
+            dialog = DivergeResolveDialog(diverged, entry="pull", parent=self)
+            if not dialog.exec():
+                return
+            self._start_diverge_resolve(project, diverged, dialog.selected_strategy(), entry="pull")
+            return
         self._auto_sync_delay_timer.stop()
         self._set_busy(True)
         self._set_floating_task("拉取中…")
@@ -2781,6 +2819,105 @@ class MainWindow(QMainWindow):
         self._set_progress_style("success")
         self._append_log("拉取完成。")
         self.refresh_selected(show_dialog=False)
+
+    # ------------------------------------------------------------------
+    # 分叉处理
+    # ------------------------------------------------------------------
+
+    def _find_diverged_remotes(self, project: ProjectConfig) -> list[dict]:
+        '''从缓存状态里找出已分叉的远程（ahead>0 且 behind>0）。'''
+        result = self.results.get(project.project_id, {})
+        diverged: list[dict] = []
+        for key, data in result.get("remotes", {}).items():
+            remote = project.remotes.get(key)
+            if remote is None or remote.kind == "local" or not remote.enabled:
+                continue
+            ahead = data.get("ahead")
+            behind = data.get("behind")
+            if ahead is not None and behind is not None and int(ahead) > 0 and int(behind) > 0:
+                diverged.append({
+                    "key": key,
+                    "remote": remote,
+                    "label": remote.label or remote.kind,
+                    "ahead": int(ahead),
+                    "behind": int(behind),
+                })
+        return diverged
+
+    def _start_diverge_resolve(
+        self, project: ProjectConfig, diverged: list[dict], strategy: str, entry: str,
+    ) -> None:
+        '''启动分叉处理：用用户选的策略依次处理所有分叉远程，全部完成后再刷新。'''
+        self._pending_diverged = list(diverged)
+        self._diverge_total = len(diverged)
+        self._diverge_done = 0
+        self._pending_diverge_strategy = strategy
+        self._pending_diverge_entry = entry
+        self._pending_diverge_project = project
+        strategy_label = {
+            "merge": "合并", "rebase": "变基",
+            "force_local": "用本地覆盖远程", "force_remote": "用远程覆盖本地",
+        }.get(strategy, strategy)
+        telemetry.track("分叉处理")
+        self._auto_sync_delay_timer.stop()
+        self._set_busy(True)
+        self._set_floating_task("处理分叉…")
+        self.progress_bar.setRange(0, self._diverge_total)
+        self.progress_bar.setValue(0)
+        self._set_progress_style("running")
+        self._append_log(f"开始处理分叉（共 {self._diverge_total} 个渠道，策略：{strategy_label}）")
+        self._process_next_diverged(project)
+
+    def _process_next_diverged(self, project: ProjectConfig) -> None:
+        if not self._pending_diverged:
+            self._on_all_diverge_completed()
+            return
+        target = self._pending_diverged.pop(0)
+        remote = target["remote"]
+        strategy = self._pending_diverge_strategy
+        strategy_label = {
+            "merge": "合并", "rebase": "变基",
+            "force_local": "用本地覆盖远程", "force_remote": "用远程覆盖本地",
+        }.get(strategy, strategy)
+        idx = self._diverge_total - len(self._pending_diverged)
+        self._show_busy_dialog(f"{strategy_label} · {target['label']} · {idx}/{self._diverge_total}")
+        if self.busy_dialog and _qobj_alive(self.busy_dialog):
+            self.busy_dialog.set_title("处理分叉")
+        self._append_log(f"[{idx}/{self._diverge_total}] 处理 {target['label']}（{strategy_label}）…")
+        self.diverge_worker = DivergeResolveWorker(project, remote, strategy, target["key"])
+        self.diverge_worker.log_message.connect(self._append_log)
+        self.diverge_worker.detailed_progress.connect(self._on_detailed_progress)
+        self.diverge_worker.result_ready.connect(self._on_diverge_result)
+        self.diverge_worker.failed.connect(lambda m: self._append_log(f"分叉处理失败：{m}"))
+        self.diverge_worker.completed.connect(lambda: self._on_one_diverge_done(project))
+        self.diverge_worker.start()
+
+    def _on_one_diverge_done(self, project: ProjectConfig) -> None:
+        self._diverge_done += 1
+        self.progress_bar.setValue(self._diverge_done)
+        self._process_next_diverged(project)
+
+    def _on_diverge_result(self, result: dict) -> None:
+        self._append_log(result.get("message", ""))
+        conflicts = result.get("conflicts") or []
+        for conflict_file in conflicts[:5]:
+            self._append_log(f"  冲突文件：{conflict_file}")
+        if len(conflicts) > 5:
+            self._append_log(f"  …等共 {len(conflicts)} 个文件冲突")
+
+    def _on_all_diverge_completed(self) -> None:
+        self._set_busy(False)
+        self._hide_busy_dialog()
+        self._set_progress_style("success")
+        entry = getattr(self, "_pending_diverge_entry", "")
+        project = getattr(self, "_pending_diverge_project", None)
+        self._append_log(f"所有分叉处理完成（共 {self._diverge_total} 个渠道）。")
+        # sync 入口：分叉处理完后继续正常同步，把本地渠道和其他渠道都推一遍
+        if entry == "sync" and project is not None:
+            self._append_log("继续同步全部渠道…")
+            self._start_sync(project, commit_message="")
+        else:
+            self.refresh_selected(show_dialog=False)
 
     def _start_sync(self, project: ProjectConfig, commit_message: str = "", automatic: bool = False, creating: bool = False) -> None:
         self._set_floating_task("创建仓库中…" if creating else "同步中…")
@@ -2812,7 +2949,7 @@ class MainWindow(QMainWindow):
         if fw is not None:
             fw.set_channels(channel_keys)
             fw.begin_sync(channel_keys)
-        self.sync_worker = SyncWorker(project, commit_message=commit_message, full_sync=bool(values["full_sync"]))
+        self.sync_worker = SyncWorker(project, commit_message=commit_message, full_sync=bool(values["full_sync"]), automatic=automatic)
         self.sync_worker.log_message.connect(self._append_log)
         self.sync_worker.progress_changed.connect(self._on_progress_changed)
         self.sync_worker.result_ready.connect(self._on_sync_result)
@@ -3455,5 +3592,161 @@ class MainWindow(QMainWindow):
         if project and Path(project.workspace_path).exists():
             telemetry.track("打开终端")
             os.startfile("cmd.exe", "open", f'/K cd /d "{project.workspace_path}"')
+
+    # ------------------------------------------------------------------
+    # 卡片右键菜单
+    # ------------------------------------------------------------------
+
+    def _show_card_context_menu(self, key: str, global_pos: QPoint) -> None:
+        project = self._current_project()
+        if not project:
+            return
+        menu = QMenu(self)
+
+        if key == "__staging__":
+            refresh_action = menu.addAction("单独刷新")
+            refresh_action.triggered.connect(lambda: self._refresh_single_channel(key))
+            menu.addSeparator()
+            open_dir_action = menu.addAction("打开项目目录")
+            open_dir_action.triggered.connect(self.open_local)
+            terminal_action = menu.addAction("在终端打开")
+            terminal_action.triggered.connect(self.open_terminal)
+        else:
+            remote = project.remotes.get(key)
+            if remote is None:
+                return
+            push_action = menu.addAction("单独推送")
+            push_action.triggered.connect(lambda: self._push_single_channel(key))
+            pull_action = menu.addAction("单独拉取")
+            pull_action.triggered.connect(lambda: self._pull_single_channel(key))
+            refresh_action = menu.addAction("单独刷新")
+            refresh_action.triggered.connect(lambda: self._refresh_single_channel(key))
+            menu.addSeparator()
+            if remote.kind != "local" and remote.url:
+                browser_action = menu.addAction("在浏览器打开仓库")
+                browser_action.triggered.connect(lambda: webbrowser.open(remote.url))
+            if remote.url:
+                copy_action = menu.addAction("复制远程地址")
+                copy_action.triggered.connect(lambda: QApplication.clipboard().setText(remote.url))
+            edit_action = menu.addAction("编辑渠道配置")
+            edit_action.triggered.connect(lambda: self._edit_channel(key))
+            menu.addSeparator()
+            open_dir_action = menu.addAction("打开项目目录")
+            open_dir_action.triggered.connect(self.open_local)
+            terminal_action = menu.addAction("在终端打开")
+            terminal_action.triggered.connect(self.open_terminal)
+
+        menu.exec(global_pos)
+
+    def _push_single_channel(self, key: str) -> None:
+        project = self._current_project()
+        if not project:
+            return
+        if self.sync_worker and self.sync_worker.isRunning():
+            self._append_log("同步进行中，请稍后再推送。")
+            return
+        if self.diverge_worker and self.diverge_worker.isRunning():
+            self._append_log("分叉处理中，请稍后再推送。")
+            return
+        telemetry.track("单独推送")
+        self._append_log(f"开始单独推送：{key}")
+        self._set_busy(True)
+        self._show_busy_dialog(f"正在推送 {key}")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self._set_progress_style("running")
+        self.single_channel_worker = SingleChannelWorker(project, key, action="push")
+        self.single_channel_worker.log_message.connect(self._append_log)
+        self.single_channel_worker.detailed_progress.connect(self._on_detailed_progress)
+        self.single_channel_worker.result_ready.connect(self._on_single_channel_result)
+        self.single_channel_worker.failed.connect(lambda m: self._append_log(f"推送失败：{m}"))
+        self.single_channel_worker.completed.connect(self._on_single_channel_completed)
+        self.single_channel_worker.start()
+
+    def _pull_single_channel(self, key: str) -> None:
+        project = self._current_project()
+        if not project:
+            return
+        if self.sync_worker and self.sync_worker.isRunning():
+            self._append_log("同步进行中，请稍后再拉取。")
+            return
+        if self.diverge_worker and self.diverge_worker.isRunning():
+            self._append_log("分叉处理中，请稍后再拉取。")
+            return
+        telemetry.track("单独拉取")
+        self._append_log(f"开始单独拉取：{key}")
+        self._set_busy(True)
+        self._show_busy_dialog(f"正在拉取 {key}")
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self._set_progress_style("running")
+        self.single_channel_worker = SingleChannelWorker(project, key, action="pull")
+        self.single_channel_worker.log_message.connect(self._append_log)
+        self.single_channel_worker.detailed_progress.connect(self._on_detailed_progress)
+        self.single_channel_worker.result_ready.connect(self._on_single_channel_result)
+        self.single_channel_worker.failed.connect(lambda m: self._append_log(f"拉取失败：{m}"))
+        self.single_channel_worker.completed.connect(self._on_single_channel_completed)
+        self.single_channel_worker.start()
+
+    def _on_single_channel_result(self, result: dict) -> None:
+        self._append_log(result.get("message", ""))
+
+    def _on_single_channel_completed(self) -> None:
+        self._set_busy(False)
+        self._hide_busy_dialog()
+        self._set_progress_style("success")
+        self._append_log("单渠道操作完成。")
+        self.refresh_selected(show_dialog=False)
+
+    def _refresh_single_channel(self, key: str) -> None:
+        project = self._current_project()
+        if not project:
+            return
+        if self.worker and self.worker.isRunning():
+            self._append_log("状态检查进行中，请稍后再刷新。")
+            return
+        # 暂存区卡片：刷新本地状态（顺带刷新全部远程，保持状态一致）
+        if key == "__staging__":
+            self._append_log("刷新本地状态…")
+            self.refresh_selected(show_dialog=False)
+            return
+        telemetry.track("单独刷新")
+        self._append_log(f"开始单独刷新：{key}")
+        self.single_refresh_worker = SingleRefreshWorker(project, key)
+        self.single_refresh_worker.log_message.connect(self._append_log)
+        self.single_refresh_worker.result_ready.connect(self._on_single_refresh_result)
+        self.single_refresh_worker.failed.connect(lambda m: self._append_log(f"刷新失败：{m}"))
+        self.single_refresh_worker.completed.connect(lambda: self._append_log("单渠道刷新完成。"))
+        self.single_refresh_worker.start()
+
+    def _on_single_refresh_result(self, key: str, status: dict) -> None:
+        project = self._current_project()
+        if not project:
+            return
+        result = self.results.setdefault(project.project_id, {})
+        remotes = result.setdefault("remotes", {})
+        remotes[key] = status
+        self._render_cards(result)
+        self._update_floating_widget()
+
+    def _edit_channel(self, key: str) -> None:
+        project = self._current_project()
+        if not project:
+            return
+        remote = project.remotes.get(key)
+        if remote is None:
+            return
+        dialog = GitDialog(self, project=project, remote=remote)
+        dialog.setWindowTitle("编辑 Git 渠道")
+        if not dialog.exec():
+            return
+        new_remote = dialog.build_remote()
+        self.remotes[key] = new_remote
+        self.store.global_remotes = self.remotes
+        for p in self.projects:
+            p.remotes = self.remotes
+        self.store.save(self.projects)
+        self._append_log(f"已更新渠道配置：{new_remote.label or key}")
+        self.refresh_selected(show_dialog=False)
 
 

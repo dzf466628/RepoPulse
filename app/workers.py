@@ -6,7 +6,7 @@ from __future__ import annotations
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from app.core.git_service import GitService
-from app.models import ProjectConfig
+from app.models import ProjectConfig, RemoteConfig
 
 
 class StatusWorker(QThread):
@@ -60,11 +60,12 @@ class SyncWorker(QThread):
     channel_finished = pyqtSignal(str, bool)
     detailed_progress = pyqtSignal(str, int, int, str)  # task_name, current, total, detail_text
 
-    def __init__(self, project: ProjectConfig, commit_message: str = "", full_sync: bool = False):
+    def __init__(self, project: ProjectConfig, commit_message: str = "", full_sync: bool = False, automatic: bool = False):
         super().__init__()
         self.project = project
         self.commit_message = commit_message
         self.full_sync = full_sync
+        self.automatic = automatic
 
     def run(self) -> None:
         try:
@@ -115,6 +116,7 @@ class SyncWorker(QThread):
                 commit_result = service.commit_project(
                     self.project,
                     self.commit_message or f"更新项目：{self.project.name}",
+                    automatic=self.automatic,
                 )
                 self.log_message.emit(commit_result["message"])
                 mark_complete()
@@ -190,6 +192,99 @@ class PullWorker(QThread):
             results = service.pull_to_local(self.project, progress=mark_complete)
             self.result_ready.emit(results)
         except Exception as exc:
+            self.failed.emit(str(exc))
+        finally:
+            self.completed.emit()
+
+
+class DivergeResolveWorker(QThread):
+    """后台处理已分叉的仓库：按用户选的策略 merge / rebase / force。"""
+
+    result_ready = pyqtSignal(object)
+    log_message = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    completed = pyqtSignal()
+    progress_changed = pyqtSignal(int, int)
+    detailed_progress = pyqtSignal(str, int, int, str)
+
+    def __init__(self, project: ProjectConfig, remote: RemoteConfig, strategy: str, remote_key: str = ""):
+        super().__init__()
+        self.project = project
+        self.remote = remote
+        self.strategy = strategy
+        self.remote_key = remote_key
+
+    def run(self) -> None:
+        try:
+            service = GitService(log=self.log_message.emit, progress=self.detailed_progress.emit)
+            self.progress_changed.emit(0, 1)
+            result = service.resolve_divergence(
+                self.project,
+                self.remote,
+                self.strategy,
+                progress=lambda: self.progress_changed.emit(1, 1),
+                remote_key=self.remote_key,
+            )
+            self.result_ready.emit(result)
+        except Exception as exc:  # pragma: no cover - 最后一道线程保护
+            self.failed.emit(str(exc))
+        finally:
+            self.completed.emit()
+
+
+class SingleChannelWorker(QThread):
+    """单渠道推送或拉取（右键菜单"单独推送/单独拉取"用）。"""
+
+    result_ready = pyqtSignal(object)
+    log_message = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    completed = pyqtSignal()
+    detailed_progress = pyqtSignal(str, int, int, str)
+
+    def __init__(self, project: ProjectConfig, remote_key: str, action: str = "push"):
+        super().__init__()
+        self.project = project
+        self.remote_key = remote_key
+        self.action = action  # "push" | "pull"
+
+    def run(self) -> None:
+        try:
+            service = GitService(log=self.log_message.emit, progress=self.detailed_progress.emit)
+            if self.action == "push":
+                result = service.push_channel(self.project, self.remote_key)
+            else:
+                result = service.pull_channel(self.project, self.remote_key)
+            self.result_ready.emit(result)
+        except Exception as exc:  # pragma: no cover
+            self.failed.emit(str(exc))
+        finally:
+            self.completed.emit()
+
+
+class SingleRefreshWorker(QThread):
+    """单渠道状态刷新（右键菜单"单独刷新"用）。"""
+
+    result_ready = pyqtSignal(str, dict)  # remote_key, status
+    log_message = pyqtSignal(str)
+    failed = pyqtSignal(str)
+    completed = pyqtSignal()
+
+    def __init__(self, project: ProjectConfig, remote_key: str):
+        super().__init__()
+        self.project = project
+        self.remote_key = remote_key
+
+    def run(self) -> None:
+        try:
+            service = GitService(log=self.log_message.emit)
+            local = service.local_status(self.project)
+            remote = self.project.remotes.get(self.remote_key)
+            if remote is None:
+                self.failed.emit(f"未找到渠道：{self.remote_key}")
+                return
+            result = service.remote_status(self.project, remote, local, self.remote_key)
+            self.result_ready.emit(self.remote_key, result)
+        except Exception as exc:  # pragma: no cover
             self.failed.emit(str(exc))
         finally:
             self.completed.emit()

@@ -1085,7 +1085,7 @@ class GitService:
                 if remote.kind == "local":
                     result = self._sync_local_channel(source, branch, remote, project, label, full_sync=full_sync)
                 else:
-                    result = self._sync_remote_channel(source, branch, remote, project.name, label, full_sync=full_sync)
+                    result = self._sync_remote_channel(source, branch, remote, project.name, label, full_sync=full_sync, remote_key=key)
             except GitCommandError as exc:
                 result = {"ok": False, "message": f"{label}：{exc}"}
             result["key"] = key
@@ -1097,8 +1097,12 @@ class GitService:
                 progress()
         return {"project_id": project.project_id, "results": results}
 
-    def commit_project(self, project: ProjectConfig, message: str) -> dict:
-        """Commit all current project changes before a requested sync."""
+    def commit_project(self, project: ProjectConfig, message: str, automatic: bool = False) -> dict:
+        """Commit all current project changes before a requested sync.
+
+        automatic=True 时，如果上一条 commit 也是自动生成且尚未推送到任何远程，
+        就用 --amend 合并掉，不新建 commit。已推送的不动，避免 force push 改远程历史。
+        """
         source = Path(project.workspace_path).expanduser()
         if not source.is_dir():
             raise GitCommandError(f"本地项目目录不存在：{source}")
@@ -1128,6 +1132,16 @@ class GitService:
             self._run(["config", "user.email"], cwd=source)
         except GitCommandError:
             self._run(["config", "user.email", "repopulse@local"], cwd=source)
+        # 自动提交合并：上一条也是自动生成且未推送的，amend 掉不新建 commit
+        if automatic and self._can_amend_auto_commit(source):
+            self._run(["commit", "--amend", "-m", commit_message], cwd=source, timeout=60)
+            head = self._run(["rev-parse", "HEAD"], cwd=source)
+            return {
+                "committed": True,
+                "amended": True,
+                "message": f"已合并到上一条自动提交：{commit_message}",
+                "head": head,
+            }
         self._run(["commit", "-m", commit_message], cwd=source, timeout=60)
         head = self._run(["rev-parse", "HEAD"], cwd=source)
         return {
@@ -1620,11 +1634,39 @@ class GitService:
         project_name: str,
         label: str,
         full_sync: bool = False,
+        remote_key: str = "",
     ) -> dict:
         target_url, created = self._ensure_host_repository(remote, project_name, label)
         if not target_url:
             return {"ok": False, "message": f"{label}：未配置仓库地址"}
         self.log(f"同步 {label}：{self._mask_url(target_url)}")
+        # 无改动跳过：远程分支存在且本地领先为 0 时，不跑 push、不扫大文件
+        if not created:
+            try:
+                remote_head, _ = self._remote_head(remote, branch, target_url)
+            except GitCommandError:
+                remote_head = ""
+            if remote_head:
+                try:
+                    ahead_raw = self._run(
+                        ["rev-list", "--count", f"{remote_head}..HEAD"],
+                        cwd=source, timeout=30,
+                    ).strip()
+                    if ahead_raw.isdigit() and int(ahead_raw) == 0:
+                        # 远程已包含本地 HEAD，顺手更新远程跟踪分支，
+                        # 否则 force 推送后跳过会让 branch -r --contains 永远不准
+                        if remote_key:
+                            try:
+                                self._run(
+                                    ["update-ref", f"refs/remotes/{remote_key}/{branch}", "HEAD"],
+                                    cwd=source, timeout=10,
+                                )
+                            except GitCommandError:
+                                pass
+                        return {"ok": True, "skipped": True,
+                                "message": f"{label}：无改动已跳过"}
+                except GitCommandError:
+                    pass
         # 先判断本次会推送哪些对象，避免上传几百 MB 后才拿到“连接被重置”这种
         # 看不出原因的报错；同时把真实原因（文件超过 100MB）直接讲清楚。
         blockers = self._outgoing_oversized_blobs(source, remote, target_url, branch)
@@ -1651,6 +1693,16 @@ class GitService:
             capture_progress=True,
             progress_task=f"推送 {label}",
         )
+        # push 用 URL 不会自动更新远程跟踪分支，这里手动补一下，
+        # 后续 commit_project 才能靠 git branch -r --contains 判断是否已推送。
+        if remote_key:
+            try:
+                self._run(
+                    ["update-ref", f"refs/remotes/{remote_key}/{branch}", "HEAD"],
+                    cwd=source, timeout=10,
+                )
+            except GitCommandError:
+                pass
         if created:
             return {"ok": True, "message": f"{label}：已创建仓库并推送完成"}
         return {"ok": True, "message": f"{label}：同步完成"}
@@ -1703,3 +1755,232 @@ class GitService:
             if progress:
                 progress()
         return results
+
+    # ------------------------------------------------------------------
+    # 单渠道操作
+    # ------------------------------------------------------------------
+
+    def push_channel(self, project: ProjectConfig, remote_key: str) -> dict:
+        """只推送到指定远程渠道，不碰其他渠道。"""
+        source = Path(project.workspace_path).expanduser()
+        if not source.is_dir():
+            raise GitCommandError(f"本地项目目录不存在：{source}")
+        self._run(["rev-parse", "--show-toplevel"], cwd=source)
+        dirty = self._run(["status", "--porcelain"], cwd=source)
+        if dirty:
+            raise GitCommandError("工作区有未提交改动，请先提交后再推送")
+        remote = project.remotes.get(remote_key)
+        if remote is None:
+            raise GitCommandError(f"未找到渠道：{remote_key}")
+        branch = project.default_branch or ""
+        if not branch:
+            try:
+                branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
+            except GitCommandError:
+                branch = "main"
+        branch = branch or "main"
+        label = remote.label or remote.kind
+        if remote.kind == "local":
+            return self._sync_local_channel(source, branch, remote, project, label)
+        return self._sync_remote_channel(
+            source, branch, remote, project.name, label, remote_key=remote_key,
+        )
+
+    def pull_channel(self, project: ProjectConfig, remote_key: str) -> dict:
+        """只从指定远程渠道拉取（快进；分叉时返回失败，不强行合并）。"""
+        source = Path(project.workspace_path).expanduser()
+        if not source.is_dir():
+            raise GitCommandError(f"本地项目目录不存在：{source}")
+        self._run(["rev-parse", "--show-toplevel"], cwd=source)
+        dirty = self._run(["status", "--porcelain"], cwd=source)
+        if dirty:
+            raise GitCommandError("工作区有未提交改动，请先提交或暂存后再拉取")
+        remote = project.remotes.get(remote_key)
+        if remote is None:
+            raise GitCommandError(f"未找到渠道：{remote_key}")
+        if remote.kind == "local":
+            return {"ok": False, "label": remote.label or "local",
+                    "message": "本地渠道不支持拉取"}
+        branch = project.default_branch or ""
+        if not branch:
+            try:
+                branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
+            except GitCommandError:
+                branch = "main"
+        branch = branch or "main"
+        label = remote.label or remote.kind
+        target_url = remote.url or self.repository_url_for_project(remote, project.name)
+        self.log(f"拉取 {label}：{self._mask_url(target_url)}")
+        self._run(
+            ["fetch", "--quiet", target_url, branch],
+            cwd=source, timeout=20, extra_env=self._auth_env(remote),
+        )
+        try:
+            self._run(["merge", "--ff-only", "FETCH_HEAD"], cwd=source, timeout=20)
+        except GitCommandError as exc:
+            return {"ok": False, "label": label,
+                    "message": f"{label}：拉取失败（可能已分叉，请用主按钮处理）：{exc}"}
+        # 拉取成功后更新远程跟踪分支，让后续 amend 判断准确
+        try:
+            self._run(
+                ["update-ref", f"refs/remotes/{remote_key}/{branch}", "HEAD"],
+                cwd=source, timeout=10,
+            )
+        except GitCommandError:
+            pass
+        return {"ok": True, "label": label, "message": f"{label}：已快进拉取最新"}
+
+    # ------------------------------------------------------------------
+    # 分叉处理
+    # ------------------------------------------------------------------
+
+    def resolve_divergence(
+        self,
+        project: ProjectConfig,
+        remote: RemoteConfig,
+        strategy: str,
+        progress: Callable[[], None] | None = None,
+        remote_key: str = "",
+    ) -> dict:
+        """处理已分叉的仓库。
+
+        strategy 取值：
+          - "merge":        fetch + merge，保留两边历史
+          - "rebase":       fetch + rebase，把本地提交挪到远程之上
+          - "force_local":  push --force-with-lease，用本地覆盖远程
+          - "force_remote": fetch + reset --hard，用远程覆盖本地
+
+        merge / rebase 遇到冲突时自动 abort，把仓库恢复到操作前的干净状态，
+        绝不留在 MERGING / REBASE 中间状态让用户收拾烂摊子。
+        """
+        source = Path(project.workspace_path).expanduser()
+        if not source.is_dir():
+            raise GitCommandError(f"本地项目目录不存在：{source}")
+        self._run(["rev-parse", "--show-toplevel"], cwd=source)
+        dirty = self._run(["status", "--porcelain"], cwd=source)
+        if dirty:
+            raise GitCommandError("工作区有未提交改动，请先提交或暂存后再处理分叉")
+        branch = project.default_branch or ""
+        if not branch:
+            try:
+                branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
+            except GitCommandError:
+                branch = "main"
+        branch = branch or "main"
+        label = remote.label or remote.kind
+        target_url = remote.url or self.repository_url_for_project(remote, project.name)
+        strategy = (strategy or "").strip().lower()
+
+        # force_local 是纯推送方向，不需要先 fetch。
+        # 用 --force 而非 --force-with-lease：本项目 push 走 URL 不走 remote 名，
+        # 远程跟踪分支从不自动更新，--force-with-lease 会因跟踪分支过期而静默拒绝。
+        # 用户已在 UI 层经过二次确认，这里直接覆盖。
+        if strategy == "force_local":
+            self.log(f"强制推送 {label}：{self._mask_url(target_url)}")
+            self._run(
+                ["push", "--force", target_url, f"HEAD:refs/heads/{branch}"],
+                cwd=source,
+                timeout=600,
+                extra_env=self._auth_env(remote),
+                capture_progress=True,
+                progress_task=f"强制推送 {label}",
+            )
+            # 推送成功后同步远程跟踪分支，让后续 amend / 状态判断准确
+            if remote_key:
+                try:
+                    self._run(
+                        ["update-ref", f"refs/remotes/{remote_key}/{branch}", "HEAD"],
+                        cwd=source, timeout=10,
+                    )
+                except GitCommandError:
+                    pass
+            if progress:
+                progress()
+            return {"ok": True, "label": label, "strategy": strategy,
+                    "message": f"{label}：已用本地覆盖远程"}
+
+        # 其余策略都需要先把远程最新抓下来
+        self.log(f"抓取 {label}：{self._mask_url(target_url)}")
+        self._run(
+            ["fetch", "--quiet", target_url, branch],
+            cwd=source,
+            timeout=60,
+            extra_env=self._auth_env(remote),
+        )
+
+        if strategy == "force_remote":
+            self._run(["reset", "--hard", "FETCH_HEAD"], cwd=source, timeout=60)
+            if progress:
+                progress()
+            return {"ok": True, "label": label, "strategy": strategy,
+                    "message": f"{label}：已用远程覆盖本地"}
+
+        if strategy == "merge":
+            try:
+                self._run(["merge", "--no-edit", "FETCH_HEAD"], cwd=source, timeout=120)
+                if progress:
+                    progress()
+                return {"ok": True, "label": label, "strategy": strategy,
+                        "message": f"{label}：合并完成"}
+            except GitCommandError:
+                conflicts = self._conflict_files(source)
+                self._abort_merge(source)
+                if conflicts:
+                    return {"ok": False, "label": label, "strategy": strategy,
+                            "conflicts": conflicts,
+                            "message": f"{label}：合并冲突（{len(conflicts)} 个文件），已自动撤销，请手动解决后重试"}
+                raise
+
+        if strategy == "rebase":
+            try:
+                self._run(["rebase", "FETCH_HEAD"], cwd=source, timeout=120)
+                if progress:
+                    progress()
+                return {"ok": True, "label": label, "strategy": strategy,
+                        "message": f"{label}：变基完成"}
+            except GitCommandError:
+                conflicts = self._conflict_files(source)
+                self._abort_rebase(source)
+                if conflicts:
+                    return {"ok": False, "label": label, "strategy": strategy,
+                            "conflicts": conflicts,
+                            "message": f"{label}：变基冲突（{len(conflicts)} 个文件），已自动撤销，请手动解决后重试"}
+                raise
+
+        raise GitCommandError(f"未知的分叉处理策略：{strategy}")
+
+    def _conflict_files(self, source: Path) -> list[str]:
+        """返回当前处于未合并（冲突）状态的文件列表。"""
+        try:
+            output = self._run(["diff", "--name-only", "--diff-filter=U"], cwd=source)
+        except GitCommandError:
+            return []
+        return [line.strip() for line in output.splitlines() if line.strip()]
+
+    def _abort_merge(self, source: Path) -> None:
+        try:
+            self._run(["merge", "--abort"], cwd=source, timeout=30)
+        except GitCommandError:
+            pass
+
+    def _abort_rebase(self, source: Path) -> None:
+        try:
+            self._run(["rebase", "--abort"], cwd=source, timeout=30)
+        except GitCommandError:
+            pass
+
+    def _can_amend_auto_commit(self, source: Path) -> bool:
+        """上一条 commit 是自动生成且未推送到任何远程时返回 True。"""
+        try:
+            head_msg = self._run(["log", "-1", "--format=%s"], cwd=source)
+        except GitCommandError:
+            return False
+        # 自动生成的 message：更新项目：xxx / 快速同步：xxx / 定时同步 时间 / 检测同步 时间
+        if not re.match(r'^(更新项目|快速同步|定时同步|检测同步)[:：\s]', head_msg):
+            return False
+        # 已推送过的不动：有任何远程跟踪分支包含 HEAD 就不 amend
+        try:
+            remotes_containing = self._run(["branch", "-r", "--contains", "HEAD"], cwd=source)
+        except GitCommandError:
+            return False
+        return not remotes_containing.strip()
