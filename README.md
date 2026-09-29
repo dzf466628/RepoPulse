@@ -6,7 +6,7 @@
 
 **把多处仓库的状态，放进同一张桌面**
 
-[![version](https://img.shields.io/badge/version-v1.0.22-16e5ee?style=flat-square)](https://github.com/dzf466628/RepoPulse/releases)
+[![version](https://img.shields.io/badge/version-v1.0.24-16e5ee?style=flat-square)](https://github.com/dzf466628/RepoPulse/releases)
 [![license](https://img.shields.io/badge/license-GPL--3.0-73df9a?style=flat-square)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.10%2B-ffc76b?style=flat-square)](https://www.python.org/)
 [![windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?style=flat-square)]()
@@ -28,12 +28,14 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 
 ### 自带 Git — 装完就能用，不用先折腾环境
 
-安装包内置一份精简版 Git（MinGit，约 91 MB），放在软件自己的目录里，**不写注册表、不改系统 PATH**。电脑上从来没装过 Git，打开也能直接建项目、提交、同步。
+安装包内置一份精简版 Git（MinGit，约 91 MB）和 **git-lfs**（约 13 MB），放在软件自己的目录里。电脑上从来没装过 Git，打开也能直接建项目、提交、同步；用了 LFS 的大文件仓库（素材、模型、数据集）也照常工作，不会把文件本体塞进仓库。
 
 - 查找顺序：**内置那份 → 用户目录 → 系统 PATH**，内置优先，版本和行为都可控
+- 安装时可勾选「让命令行、AI 助手、IDE 也能使用自带的 Git」（默认勾选）：把内置 Git 的目录登记到你的**用户 PATH**，之后其他程序打开就能直接敲 `git`，不必再单独装一个。随时可以在「设置 → 软件设置」里关掉，只影响当前用户、不需要管理员
+- 只写用户 PATH，不动系统 PATH、不动注册表里其他项；卸载时自动撤销自己登记的那一段
 - 万一内置那份被杀毒软件删了，会自动改用你电脑上装的 Git，并弹一句人话提示，而不是甩一个系统报错
-- 排障一条命令：`RepoPulse.exe --git-info`；「设置 → 关于」里也写着当前用的是哪一份、什么版本
-- 内置的 Git 以 **GNU GPL v2** 分发，许可证全文随程序附在 `_internal\git\LICENSE.txt`
+- 排障一条命令：`RepoPulse.exe --git-info`（打印来源、路径、版本和 LFS 版本）；「设置 → 关于」里也写着当前用的是哪一份、什么版本
+- 内置的 Git 和 git-lfs 都以 **GNU GPL v2** 分发，许可证全文随程序附在 `_internal\git\LICENSE.txt`
 
 ### 项目总览 — 先看全局再点细节
 
@@ -94,12 +96,13 @@ RepoPulse 是一个面向 Windows 的中文 Git 状态台。把本地、NAS、Gi
 
 ```powershell
 python -m pip install -r requirements.txt
-pwsh -File tools\fetch_minigit.ps1   # 取一份内置 Git（约 91 MB，不进库）
+pwsh -File tools\fetch_minigit.ps1   # 取内置 Git + git-lfs（约 104 MB，不进库）
 python main.py
 ```
 
 软件自带 Git，用户不用单独安装（安装包内已含）；从源码跑时上面这条脚本会把
-MinGit 放到 `vendor\git`，没取到也能退回用系统已装的 Git。
+MinGit 和 git-lfs 放到 `vendor\git`。脚本优先用你自己的源站，回退国内镜像
+（不需要代理）和官方发布，两个包都强制校验 SHA256。
 
 GitHub 私有仓库请先确认本机 SSH 密钥已配置好（也可以用 Token），并按需打开代理。
 
@@ -111,7 +114,7 @@ GitHub 私有仓库请先确认本机 SSH 密钥已配置好（也可以用 Toke
 
 安装包面向 Windows 10 / 11 64 位，使用目录版打包。
 
-**不需要先装 Git**：安装包已内置一份精简版 Git，装完打开就能用。
+**不需要先装 Git**：安装包已内置一份精简版 Git（含 git-lfs），装完打开就能用。安装时可以顺手勾上「让命令行、AI 助手、IDE 也能使用自带的 Git」，这样你这台电脑上任何程序敲 `git` 都能用上它。
 
 ---
 
@@ -127,11 +130,16 @@ GitHub 私有仓库请先确认本机 SSH 密钥已配置好（也可以用 Toke
 <details>
 <summary><b>要自己先装 Git 吗？</b></summary>
 
-不用。安装包自带一份精简版 Git（MinGit，约 91 MB，单独放在软件目录里，不写注册表、不改系统 PATH），
-装完打开就能用。软件按这个顺序找 Git：**内置那份 → 用户目录 → 系统 PATH**；
-万一内置那份被杀毒软件删了，它会自动用你电脑上装的 Git，并且弹一句人话提示，而不是甩一个系统报错。
+不用。安装包自带一份精简版 Git（MinGit，约 91 MB）和 git-lfs（约 13 MB），单独放在软件目录里，
+装完打开就能用；用了 LFS 的仓库也不会把大文件本体提交进去。软件按这个顺序找 Git：
+**内置那份 → 用户目录 → 系统 PATH**；万一内置那份被杀毒软件删了，它会自动用你电脑上装的 Git，
+并且弹一句人话提示，而不是甩一个系统报错。
 
-排障时运行 `RepoPulse.exe --git-info`，会直接告诉你当前用的是哪一份 Git、什么版本。
+安装时可以勾选「让命令行、AI 助手、IDE 也能使用自带的 Git」，把这份 Git 登记到你的**用户 PATH** ——
+之后命令行敲 `git`、AI 助手找 git、IDE 集成 Git 都能用上它，不用再单独装。这项只写当前用户的 PATH，
+不需要管理员，随时可以在「设置 → 软件设置」里关掉，卸载时也会自动撤销。
+
+排障时运行 `RepoPulse.exe --git-info`，会直接告诉你当前用的是哪一份 Git、什么版本、LFS 版本多少。
 
 </details>
 
