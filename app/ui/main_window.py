@@ -2715,15 +2715,8 @@ class MainWindow(QMainWindow):
             has_changes = (not is_uncreated) and any(
                 local.get(key, 0) for key in ("staged", "modified", "untracked", "conflicts")
             )
-        # 分叉检测：有任意远程 ahead>0 且 behind>0 时先弹选择框，不硬 push
-        diverged = self._find_diverged_remotes(project)
-        if diverged:
-            dialog = DivergeResolveDialog(diverged, entry="sync", parent=self)
-            if not dialog.exec():
-                return
-            self._start_diverge_resolve(project, diverged, dialog.selected_strategy(), entry="sync")
-            return
-
+        # 先获取提交说明（有未提交修改时），再检测分叉。
+        # 必须先提交再处理分叉，否则 resolve_divergence 会因工作区脏而拒绝执行。
         commit_message = ""
         if has_changes:
             if quick:
@@ -2739,6 +2732,19 @@ class MainWindow(QMainWindow):
                 if not ok:
                     return
                 commit_message = commit_message.strip() or default_message
+
+        # 分叉检测：有任意远程 ahead>0 且 behind>0 时先弹选择框，不硬 push
+        diverged = self._find_diverged_remotes(project)
+        if diverged:
+            dialog = DivergeResolveDialog(diverged, entry="sync", parent=self)
+            if not dialog.exec():
+                return
+            self._start_diverge_resolve(
+                project, diverged, dialog.selected_strategy(),
+                entry="sync", commit_message=commit_message,
+            )
+            return
+
         self._start_sync(project, commit_message, creating=is_uncreated)
 
     def _set_sync_busy(self, busy: bool) -> None:
@@ -2846,14 +2852,29 @@ class MainWindow(QMainWindow):
 
     def _start_diverge_resolve(
         self, project: ProjectConfig, diverged: list[dict], strategy: str, entry: str,
+        single_channel_key: str = "", commit_message: str = "",
     ) -> None:
-        '''启动分叉处理：用用户选的策略依次处理所有分叉远程，全部完成后再刷新。'''
+        '''启动分叉处理：用用户选的策略依次处理所有分叉远程，全部完成后再刷新。
+        single_channel_key 非空时表示从右键单渠道推送触发，处理完后只推该渠道。
+        commit_message 非空时表示有未提交修改，处理前先提交。'''
         self._pending_diverged = list(diverged)
         self._diverge_total = len(diverged)
         self._diverge_done = 0
         self._pending_diverge_strategy = strategy
         self._pending_diverge_entry = entry
         self._pending_diverge_project = project
+        self._pending_diverge_single_key = single_channel_key
+        self._pending_diverge_commit_message = commit_message
+        # 有未提交修改时先提交，否则 resolve_divergence 会因工作区脏而拒绝执行
+        if commit_message:
+            try:
+                service = GitService(log=self._append_log)
+                result = service.commit_project(project, commit_message)
+                self._append_log(result.get("message", ""))
+            except Exception as exc:
+                self._append_log(f"提交失败：{exc}")
+                QMessageBox.warning(self, "提交失败", str(exc))
+                return
         strategy_label = {
             "merge": "合并", "rebase": "变基",
             "force_local": "用本地覆盖远程", "force_remote": "用远程覆盖本地",
@@ -2911,9 +2932,14 @@ class MainWindow(QMainWindow):
         self._set_progress_style("success")
         entry = getattr(self, "_pending_diverge_entry", "")
         project = getattr(self, "_pending_diverge_project", None)
+        single_key = getattr(self, "_pending_diverge_single_key", "")
         self._append_log(f"所有分叉处理完成（共 {self._diverge_total} 个渠道）。")
+        # 右键单渠道推送触发：处理完后只推该渠道（force_local 已推过，无改动跳过会接住）
+        if single_key and project is not None:
+            self._append_log(f"继续推送 {single_key}…")
+            self._push_single_channel(single_key, skip_diverge_check=True)
         # sync 入口：分叉处理完后继续正常同步，把本地渠道和其他渠道都推一遍
-        if entry == "sync" and project is not None:
+        elif entry == "sync" and project is not None:
             self._append_log("继续同步全部渠道…")
             self._start_sync(project, commit_message="")
         else:
@@ -3638,7 +3664,7 @@ class MainWindow(QMainWindow):
 
         menu.exec(global_pos)
 
-    def _push_single_channel(self, key: str) -> None:
+    def _push_single_channel(self, key: str, skip_diverge_check: bool = False) -> None:
         project = self._current_project()
         if not project:
             return
@@ -3648,6 +3674,37 @@ class MainWindow(QMainWindow):
         if self.diverge_worker and self.diverge_worker.isRunning():
             self._append_log("分叉处理中，请稍后再推送。")
             return
+        # 该渠道已分叉：弹分叉处理框，用用户选的策略处理后再推送。
+        # skip_diverge_check=True 时跳过（分叉处理刚完成，缓存未刷新，避免重复弹框）
+        if not skip_diverge_check:
+            diverged = self._find_diverged_remotes(project)
+            channel_diverged = [d for d in diverged if d["key"] == key]
+            if channel_diverged:
+                # 工作区有未提交修改时，resolve_divergence 会拒绝执行，先问用户是否提交
+                commit_message = ""
+                local = self.results.get(project.project_id, {}).get("local", {})
+                has_changes = any(
+                    local.get(k, 0) for k in ("staged", "modified", "untracked", "conflicts")
+                )
+                if has_changes:
+                    reply = QMessageBox.question(
+                        self, "有未提交修改",
+                        "工作区有未提交修改，处理分叉前需要先提交。\n是否自动提交并继续？",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.Yes,
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
+                    commit_message = f"快速同步：{project.name}"
+                dialog = DivergeResolveDialog(channel_diverged, entry="single_push", parent=self)
+                if not dialog.exec():
+                    return
+                self._start_diverge_resolve(
+                    project, channel_diverged, dialog.selected_strategy(),
+                    entry="single_push", single_channel_key=key,
+                    commit_message=commit_message,
+                )
+                return
         telemetry.track("单独推送")
         self._append_log(f"开始单独推送：{key}")
         self._set_busy(True)

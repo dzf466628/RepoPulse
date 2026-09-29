@@ -1772,13 +1772,12 @@ class GitService:
         remote = project.remotes.get(remote_key)
         if remote is None:
             raise GitCommandError(f"未找到渠道：{remote_key}")
-        branch = project.default_branch or ""
-        if not branch:
-            try:
-                branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
-            except GitCommandError:
-                branch = "main"
-        branch = branch or "main"
+        local_branch = ""
+        try:
+            local_branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
+        except GitCommandError:
+            local_branch = ""
+        branch = remote.branch or project.default_branch or local_branch or "main"
         label = remote.label or remote.kind
         if remote.kind == "local":
             return self._sync_local_channel(source, branch, remote, project, label)
@@ -1801,13 +1800,12 @@ class GitService:
         if remote.kind == "local":
             return {"ok": False, "label": remote.label or "local",
                     "message": "本地渠道不支持拉取"}
-        branch = project.default_branch or ""
-        if not branch:
-            try:
-                branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
-            except GitCommandError:
-                branch = "main"
-        branch = branch or "main"
+        local_branch = ""
+        try:
+            local_branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
+        except GitCommandError:
+            local_branch = ""
+        branch = remote.branch or project.default_branch or local_branch or "main"
         label = remote.label or remote.kind
         target_url = remote.url or self.repository_url_for_project(remote, project.name)
         self.log(f"拉取 {label}：{self._mask_url(target_url)}")
@@ -1860,13 +1858,13 @@ class GitService:
         dirty = self._run(["status", "--porcelain"], cwd=source)
         if dirty:
             raise GitCommandError("工作区有未提交改动，请先提交或暂存后再处理分叉")
-        branch = project.default_branch or ""
-        if not branch:
-            try:
-                branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
-            except GitCommandError:
-                branch = "main"
-        branch = branch or "main"
+        # 和 remote_status 保持一致：remote.branch > project.default_branch > 本地当前分支
+        local_branch = ""
+        try:
+            local_branch = self._run(["symbolic-ref", "--short", "-q", "HEAD"], cwd=source)
+        except GitCommandError:
+            local_branch = ""
+        branch = remote.branch or project.default_branch or local_branch or "main"
         label = remote.label or remote.kind
         target_url = remote.url or self.repository_url_for_project(remote, project.name)
         strategy = (strategy or "").strip().lower()
