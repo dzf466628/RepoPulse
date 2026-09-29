@@ -6,7 +6,7 @@
 
 **把多处仓库的状态，放进同一张桌面**
 
-[![version](https://img.shields.io/badge/version-v1.0.19-16e5ee?style=flat-square)](https://github.com/dzf466628/RepoPulse/releases)
+[![version](https://img.shields.io/badge/version-v1.0.20-16e5ee?style=flat-square)](https://github.com/dzf466628/RepoPulse/releases)
 [![license](https://img.shields.io/badge/license-GPL--3.0-73df9a?style=flat-square)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.10%2B-ffc76b?style=flat-square)](https://www.python.org/)
 [![windows](https://img.shields.io/badge/Windows-10%2F11-0078D6?style=flat-square)]()
