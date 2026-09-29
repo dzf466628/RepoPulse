@@ -275,6 +275,34 @@ STATE_COLORS = {
     "waiting": "#8A97AA",
 }
 
+# 角标文案表：角标只有一颗小徽章那么宽（StatusCard 里硬限 116px），超了就被省略号
+# 截断——「GitHub 已忽略」实测 120px，界面上一直显示成「GitHub 已…」。所以一律用
+# 短词，差多少个提交、哪边领先交给卡片正文；分叉沿用弹窗的术语（弹窗标题就是
+# 「仓库已分叉」），免得角标和弹窗各说一套。
+BADGE_TEXT = {
+    "已连接": "待拉取",          # 远程有内容、本地还没提交，要做的是拉下来
+    "未配置": "未配置",
+    "分支不存在": "分支不存在",
+    "未代理": "已忽略",          # core 里的旧口径，别让它漏到界面上
+}
+
+
+def sync_badge_text(data: dict) -> str:
+    """按 ahead / behind 给方向角标：该往哪边走，一眼就知道点哪个按钮。
+
+    本地领先 → 待推送，远程领先 → 待拉取，两边都有 → 已分叉。
+    具体差多少个提交由卡片正文写清楚，角标只表态。
+    """
+    ahead = data.get("ahead") or 0
+    behind = data.get("behind") or 0
+    if ahead and behind:
+        return "已分叉"
+    if ahead:
+        return "待推送"
+    if behind:
+        return "待拉取"
+    return "一致"
+
 
 def state_key_from_color(color: str) -> str:
     c = (color or "").lower()
@@ -1828,22 +1856,30 @@ class MainWindow(QMainWindow):
         if not data:
             return "waiting", "等待检查"
         if data.get("ignored") and remote.kind == "github":
-            # 角标只有一颗小徽章那么宽，绝不能放长文本（会把卡片和窗口顶开）。
+            # 角标只有一颗小徽章那么宽，绝不能放长文本（会把卡片和窗口顶开，
+            # 「GitHub 已忽略」实测 120px，会被截成「GitHub 已…」）。
             # 这里只给短状态；真实的忽略原因交给 _remote_reason() 走 tooltip。
             # 也不再用“未代理”这个旧口径——实际原因可能是超大文件、鉴权失败
             # 或超时，写成“未代理”会让人以为代理没开。
-            return "warning", "GitHub 已忽略"
+            return "warning", "已忽略"
         # 远程仓库尚不存在（如 404）时，提示同步会自动创建
         if data.get("not_created") or data.get("uncreated") or data.get("relation") == "待创建":
             return "waiting", "待创建"
         if data.get("error"):
-            return "error", str(data.get("error") or "连接失败")
+            # 报错原文可能一大段（角标必被截断），而它本来就会显示在卡片正文里，
+            # 角标只给一个一眼看得懂的短状态。
+            return "error", "读取失败" if remote.kind == "local" else "连接失败"
         if remote.kind == "local":
             if not data.get("online"):
-                return "error", "本地目录读取失败"
+                return "error", "读取失败"
             if data.get("relation") == "一致":
-                return "clean", "本地一致"
-            return "warning", str(data.get("relation") or "版本不同")
+                return "clean", "一致"
+            if data.get("ahead") is None and data.get("behind") is None:
+                # 压根没比成（比如工作区还没提交），不是“领先/落后”
+                return "warning", "待同步"
+            # 原来这里写的是「版本不同」，跟正文的「本地领先/远程领先」两套话术，
+            # 现在统一成方向词。
+            return "warning", sync_badge_text(data)
         if not data.get("online"):
             return "error", "未连接"
         relation = str(data.get("relation") or "已连接")
@@ -1852,7 +1888,9 @@ class MainWindow(QMainWindow):
         # "待首次同步"也应该是灰色 waiting 状态
         if relation == "待首次同步":
             return "waiting", "待首次同步"
-        return "different", relation
+        if relation in ("本地领先", "远程领先", "已分叉"):
+            return "different", sync_badge_text(data)
+        return "different", BADGE_TEXT.get(relation, relation)
 
     def _remote_reason(self, remote, data) -> str:
         """GitHub 被忽略时的真实原因；只用于 tooltip，不参与布局。

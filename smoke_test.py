@@ -12,7 +12,8 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QApplication, QLabel
 
 from app.core.git_locator import (
     bundled_git_root,
@@ -24,7 +25,7 @@ from app.core.git_locator import (
 from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
-from app.ui.main_window import MainWindow
+from app.ui.main_window import BADGE_TEXT, MainWindow, sync_badge_text
 
 
 app = QApplication(sys.argv)
@@ -152,6 +153,62 @@ def test_ssl_override_keeps_valid_ca() -> None:
             restore()
 
 
+class _StubRemote:
+    """_remote_state_key 只用到 kind 这一个属性。"""
+
+    def __init__(self, kind: str) -> None:
+        self.kind = kind
+
+
+def test_badge_texts_fit() -> None:
+    """角标必须放得下：卡片里硬限 116px，超了就被截成「GitHub 已…」。"""
+    candidates = [
+        "一致", "待推送", "待拉取", "已分叉", "待首次同步", "待创建", "待同步",
+        "已忽略", "未连接", "连接失败", "读取失败", "未配置", "分支不存在", "等待检查",
+        *BADGE_TEXT.values(),
+    ]
+    for text in candidates:
+        label = QLabel(text)
+        label.setStyleSheet("font-size: 11px; font-weight: 700;")
+        metrics = label.fontMetrics()
+        assert metrics.elidedText(text, Qt.TextElideMode.ElideRight, 116) == text, (
+            f"角标「{text}」会被截断"
+        )
+
+
+def test_badge_states() -> None:
+    """角标：方向说清楚、报错原文不进角标、术语跟分叉弹窗一致。"""
+    window = MainWindow()
+    nas, local, github = _StubRemote("nas"), _StubRemote("local"), _StubRemote("github")
+    cases = [
+        (nas, {"online": True, "relation": "本地领先", "ahead": 3, "behind": 0}, "待推送"),
+        (nas, {"online": True, "relation": "远程领先", "ahead": 0, "behind": 2}, "待拉取"),
+        (nas, {"online": True, "relation": "已分叉", "ahead": 1, "behind": 1}, "已分叉"),
+        (nas, {"online": True, "relation": "一致"}, "一致"),
+        (nas, {"online": True, "relation": "已连接"}, "待拉取"),
+        (nas, {"online": True, "relation": "未配置"}, "未配置"),
+        (nas, {"online": True, "relation": "待首次同步"}, "待首次同步"),
+        (nas, {"online": False}, "未连接"),
+        (nas, {"online": False, "error": "fatal: unable to access ..."}, "连接失败"),
+        (github, {"ignored": True, "online": False, "error": "证书路径失效"}, "已忽略"),
+        (local, {"online": True, "relation": "一致"}, "一致"),
+        (local, {"online": True, "relation": "版本不同", "ahead": 3, "behind": 0}, "待推送"),
+        (local, {"online": True, "relation": "当前 Git 渠道"}, "待同步"),
+        (local, {"online": False}, "读取失败"),
+    ]
+    try:
+        for item, data, expected in cases:
+            got = window._remote_state_key(item, data)[1]
+            assert got == expected, f"{data} 得到「{got}」，期望「{expected}」"
+        assert sync_badge_text({"ahead": 3, "behind": 0}) == "待推送"
+        assert sync_badge_text({"ahead": 0, "behind": 2}) == "待拉取"
+        assert sync_badge_text({"ahead": 3, "behind": 2}) == "已分叉"
+        assert sync_badge_text({"ahead": 0, "behind": 0}) == "一致"
+    finally:
+        window._allow_close = True
+        window.close()
+
+
 if __name__ == "__main__":
     print("=" * 50)
     check("主窗口创建", test_window_creates)
@@ -164,6 +221,8 @@ if __name__ == "__main__":
     check("内置 CA 证书已就位", test_bundled_ca_bundle)
     check("证书路径坏掉时自动兜底", test_ssl_override_when_ca_broken)
     check("不顶掉用户自配的有效证书", test_ssl_override_keeps_valid_ca)
+    check("角标文案放得下（≤116px）", test_badge_texts_fit)
+    check("角标状态与方向映射", test_badge_states)
     print("=" * 50)
     print(f"PASSED {PASSED}  |  FAILED {FAILED}")
     raise SystemExit(0 if FAILED == 0 else 1)
