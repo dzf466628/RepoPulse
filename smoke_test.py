@@ -14,7 +14,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt6.QtWidgets import QApplication
 
-from app.core.git_locator import bundled_git_root, check_git
+from app.core.git_locator import bundled_git_root, check_git, git_lfs_version
 from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
@@ -81,6 +81,22 @@ def test_git_service_uses_bundled() -> None:
     assert service._run(["--version"]).startswith("git version"), "GitService 跑不通 git --version"
 
 
+def test_bundled_lfs_present() -> None:
+    root = bundled_git_root()
+    assert root is not None, "内置 Git 没就位：请先执行 tools\\fetch_minigit.ps1"
+    assert (root / "cmd" / "git-lfs.exe").is_file(), (
+        "内置 Git 缺少 cmd\\git-lfs.exe，用了 LFS 的仓库会把大文件本体提交进仓库"
+    )
+
+
+def test_lfs_ready() -> None:
+    service = GitService()
+    assert service.git_runtime is not None, "GitService 没找到 Git"
+    version = git_lfs_version(service.git_runtime)
+    assert version, "内置 git-lfs 跑不起来（没带 LFS 或被杀软删了）"
+    assert service.ensure_lfs().startswith("LFS 就绪"), "LFS 启动自检没通过"
+
+
 if __name__ == "__main__":
     print("=" * 50)
     check("主窗口创建", test_window_creates)
@@ -88,6 +104,8 @@ if __name__ == "__main__":
     check("Git 可用", test_git_available)
     check("内置 Git 已就位", test_bundled_git_present)
     check("GitService 绑定内置 Git", test_git_service_uses_bundled)
+    check("内置 git-lfs 已就位", test_bundled_lfs_present)
+    check("LFS 可用", test_lfs_ready)
     print("=" * 50)
     print(f"PASSED {PASSED}  |  FAILED {FAILED}")
     raise SystemExit(0 if FAILED == 0 else 1)

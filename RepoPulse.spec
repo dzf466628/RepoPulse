@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 
 import sys
 from pathlib import Path
@@ -23,12 +23,17 @@ qt_hook_collected = {
 qt_binaries = [(str(qt_bin / name), 'PyQt6') for name in qt_runtime_names if (qt_bin / name).is_file() and name not in qt_hook_collected]
 excluded_external_binaries = {'icuuc.dll', 'icudt78.dll'}
 
-# 内置 Git（MinGit）：vendor\git 不进库，由 tools\fetch_minigit.ps1 获取。
-# 没有它就别打包 —— 否则会做出一个用户装完点"新建项目"就报 WinError 2 的安装包。
+# 内置 Git（MinGit）+ git-lfs：vendor\git 不进库，由 tools\fetch_minigit.ps1 获取。
+# 没有它就别打包 —— 否则会做出一个用户装完点"新建项目"就报 WinError 2 的安装包；
+# 缺 git-lfs 则会让用了 LFS 的仓库把大文件本体提交进仓库。
 bundled_git_dir = Path(SPECPATH) / 'vendor' / 'git'
 if not (bundled_git_dir / 'cmd' / 'git.exe').is_file():
     raise SystemExit(
         r'vendor\git 不存在，先运行 tools\fetch_minigit.ps1 获取内置 Git 再打包。'
+    )
+if not (bundled_git_dir / 'cmd' / 'git-lfs.exe').is_file():
+    raise SystemExit(
+        r'vendor\git 里缺 git-lfs.exe，先运行 tools\fetch_minigit.ps1 补上再打包。'
     )
 
 

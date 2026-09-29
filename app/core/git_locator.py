@@ -118,6 +118,36 @@ def git_version(exe: str, timeout: int = 15) -> str | None:
     return text or None
 
 
+def git_lfs_version(runtime: GitRuntime, timeout: int = 15) -> str | None:
+    """跑一次 git lfs version，返回精简版本号（如 3.8.0）；没带 LFS 返回 None。
+
+    Git 是在 PATH 里找 git-lfs 的，而内置那份不保证在 PATH 上，所以这里把内置
+    目录临时拼进 PATH —— 要判断的是"这份 Git 到底带没带 LFS"，不能受外部 PATH 影响。
+    """
+    env = os.environ.copy()
+    paths = list(support_paths(runtime))
+    if paths:
+        env["PATH"] = os.pathsep.join([*paths, env.get("PATH", "")])
+    try:
+        result = subprocess.run(
+            [runtime.exe, "lfs", "version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=env,
+            creationflags=_CREATE_NO_WINDOW,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (result.stdout or result.stderr or "").strip()
+    first = text.split()[0] if text else ""
+    if not first.startswith("git-lfs/"):
+        return None
+    return first.split("/", 1)[1]
+
+
 def check_git() -> tuple[GitRuntime | None, str | None]:
     """返回 (运行时, 版本)；运行时为 None 说明这台机器上没有可用 Git。"""
     runtime = resolve_git()

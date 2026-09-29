@@ -17,7 +17,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from app.core.git_locator import missing_git_message, resolve_git, support_paths
+from app.core.git_locator import git_lfs_version, missing_git_message, resolve_git, support_paths
 from app.models import ProjectConfig, RemoteConfig
 
 
@@ -126,6 +126,33 @@ class GitService:
         if extra_env:
             env.update(extra_env)
         return env
+
+    def ensure_lfs(self) -> str:
+        r"""确认内置 LFS 可用，必要时挂一次全局过滤器。
+
+        MinGit 本身不带 LFS，git-lfs.exe 是我们额外放进 cmd\ 的；光有文件也不够，
+        还得在全局配置里挂上 filter.lfs.*，否则用了 LFS 的仓库会被当普通文件提交，
+        大文件本体直接进仓库（同步时也会失败）。
+
+        这个配置只对带 LFS 属性的仓库生效，做的是 Git for Windows 安装程序自己
+        也会做的事。返回一句可直接写进日志的话；这份 Git 没带 LFS 时返回空串。
+        """
+        if self.git_runtime is None:
+            return ""
+        version = git_lfs_version(self.git_runtime)
+        if not version:
+            return ""
+        try:
+            configured = self._run(["config", "--global", "--get", "filter.lfs.process"]).strip()
+        except GitCommandError:
+            configured = ""
+        if configured:
+            return f"LFS 就绪：{version}"
+        try:
+            self._run(["lfs", "install", "--skip-repo"], timeout=30)
+        except GitCommandError as exc:
+            return f"LFS 没启用：{exc}"
+        return f"LFS 就绪：{version}（已自动启用）"
 
     def _run(
         self,

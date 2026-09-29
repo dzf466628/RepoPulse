@@ -103,7 +103,7 @@ def _print_git_info() -> int:
 
     控制台编码在上面已经切成 UTF-8，所以这里可以直接输出中文。
     """
-    from app.core.git_locator import bundled_git_root, check_git, missing_git_message
+    from app.core.git_locator import bundled_git_root, check_git, git_lfs_version, missing_git_message
 
     runtime, version = check_git()
     if runtime is None:
@@ -112,6 +112,7 @@ def _print_git_info() -> int:
     print(f"来源：{runtime.source}")
     print(f"路径：{runtime.exe}")
     print(f"版本：{version}")
+    print(f"LFS：{git_lfs_version(runtime) or '（这份 Git 没带 LFS）'}")
     print(f"内置目录：{bundled_git_root() or '（无）'}")
     return 0
 

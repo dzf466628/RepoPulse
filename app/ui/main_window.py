@@ -3232,6 +3232,9 @@ class MainWindow(QMainWindow):
         runtime, version = check_git()
         if runtime is not None and version is not None:
             self._append_log(f"Git 就绪：{runtime.source} · {version}")
+            note = GitService().ensure_lfs()
+            if note:
+                self._append_log(note)
             return
         self._append_log("没找到可用的 Git，提交同步会失败。")
         QMessageBox.warning(self, "Git 没准备好", missing_git_message())
