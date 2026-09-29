@@ -33,3 +33,5 @@ crash.txt
 /test_full_flow.py
 /_dock_check.png
 *.log
+# 视频宣传素材（不入库）
+video_intro/
