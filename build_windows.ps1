@@ -105,3 +105,16 @@ if ($isccCode -ne 0 -or -not (Test-Path $installerPath)) {
 
 Write-Host "[3/3] Build complete"
 Write-Host "Installer: $installerPath"
+
+# 生成 sha256sum 格式校验文件（<hash>  <文件名>），和安装包一起上传到更新目录。
+# 客户端 updater.py 会下载同名 .sha256 并校验安装包，防止被劫持/损坏的包被安装。
+$hash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$checksumPath = "$installerPath.sha256"
+[System.IO.File]::WriteAllText(
+    $checksumPath,
+    ("{0}  {1}" -f $hash, (Split-Path -Leaf $installerPath)) + [Environment]::NewLine,
+    (New-Object System.Text.UTF8Encoding($false))
+)
+Write-Host "Checksum:  $checksumPath"
+Write-Host "SHA256:    $hash"
+Write-Host "[upload] 请把安装包和 .sha256 校验文件一起上传到更新目录。"

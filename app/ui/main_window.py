@@ -59,6 +59,7 @@ from app.models import ProjectConfig, RemoteConfig
 from app.storage.project_store import ProjectStore
 from app.ui.file_tree_dialog import FileTreeDialog
 from app.ui.dialogs import (
+    CommitHistoryDialog,
     DivergeResolveDialog, GitDialog, JellyCheckBox, ProjectDetailDialog, RepositoryDetailDialog, SettingsDialog,
     confirm_delete_dialog,
 )
@@ -79,16 +80,20 @@ from app.ui.theme import (
     set_dark_title_bar,
 )
 from app.workers import (
+    CommitHistoryWorker,
     DivergeResolveWorker,
     LocalStatusWorker,
     ProjectCreateWorker,
     ProjectDeleteWorker,
+    ProjectStatsWorker,
     PullWorker,
+    RestoreCommitWorker,
     SingleChannelWorker,
     SingleRefreshWorker,
     StatusWorker,
     SyncWorker,
 )
+import time as _time
 
 
 def _settings_icon() -> QIcon:
@@ -1007,6 +1012,15 @@ class MainWindow(QMainWindow):
         self._build_floating_widget()
         self._update_thread: UpdateCheckThread | None = None
         self._update_check_started = False
+        # 项目本地统计缓存：project_id -> (写入时间, compute_local_stats 结果)。
+        # 统计（os.walk + git）只跑在后台线程，UI 线程只读缓存，避免卡界面。
+        self._stats_cache: dict[str, tuple[float, dict]] = {}
+        self._stats_workers: list[ProjectStatsWorker] = []
+        self._stats_ttl = 120.0  # 秒；过期后下次使用时会后台重算
+        # 提交历史 / 恢复版本的后台线程
+        self._history_worker: CommitHistoryWorker | None = None
+        self._load_more_worker: CommitHistoryWorker | None = None
+        self._restore_worker: RestoreCommitWorker | None = None
         QTimer.singleShot(250, lambda: self.refresh_all(track_usage=False))
         QTimer.singleShot(1200, self._check_git_environment)
         QTimer.singleShot(2500, self._check_update_auto)
@@ -1142,25 +1156,30 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def _stop_background_threads(self) -> None:
-        self.auto_sync_delay_timer.stop()
+        # 修复既有 bug：原代码写成 self.auto_sync_delay_timer（属性不存在），
+        # 一进来就 AttributeError，导致整个退出清理从未真正执行过
+        self._auto_sync_delay_timer.stop()
         self.auto_sync_timer.stop()
         # 所有可能在跑的后台 QThread。这些 worker 都是重写 run() 做阻塞活，
         # 没有 exec() 事件循环，quit() 是空操作；先 quit 留作未来兼容，
-        # 等 1 秒不退就 terminate 强杀。
+        # 等 3 秒不退才 terminate 强杀——正在跑 git 的 worker 强杀可能留下
+        # .git/index.lock 或 MERGING 中间态，多等几秒通常就能自然结束。
         thread_attrs = (
             "worker", "sync_worker", "create_worker", "pull_worker",
             "delete_worker", "local_status_worker",
             "_repos_worker", "_clone_worker", "_migrate_worker", "_complete_worker",
-            "_update_thread",
+            "_update_thread", "_history_worker", "_load_more_worker", "_restore_worker",
         )
-        for attr in thread_attrs:
-            thread = getattr(self, attr, None)
+        threads = [getattr(self, attr, None) for attr in thread_attrs]
+        # 本地统计 worker 可能有多个（每次打开详情都可能开一个），单独收进来
+        threads.extend(getattr(self, "_stats_workers", None) or [])
+        for thread in threads:
             if thread is None:
                 continue
             try:
                 if thread.isRunning():
                     thread.quit()
-                    thread.wait(1000)
+                    thread.wait(3000)
                 if thread.isRunning():
                     thread.terminate()
                     thread.wait(2000)
@@ -1618,50 +1637,27 @@ class MainWindow(QMainWindow):
         return row
 
     def _project_stats(self, project: ProjectConfig) -> dict:
-        path = Path(project.workspace_path).expanduser()
-        file_count = 0
-        total_bytes = 0
-        if path.is_dir():
-            try:
-                for root, directories, files in os.walk(path):
-                    directories[:] = [item for item in directories if item != ".git"]
-                    for filename in files:
-                        file_path = Path(root) / filename
-                        try:
-                            total_bytes += file_path.stat().st_size
-                            file_count += 1
-                        except OSError:
-                            continue
-            except OSError:
-                pass
-        if total_bytes < 1024:
-            size_text = f"{total_bytes} B"
-        elif total_bytes < 1024 * 1024:
-            size_text = f"{total_bytes / 1024:.1f} KB"
-        elif total_bytes < 1024 * 1024 * 1024:
-            size_text = f"{total_bytes / (1024 * 1024):.1f} MB"
-        else:
-            size_text = f"{total_bytes / (1024 * 1024 * 1024):.1f} GB"
-        try:
-            created_at = datetime.fromtimestamp(path.stat().st_ctime).strftime("%Y-%m-%d %H:%M")
-        except OSError:
-            created_at = "未知"
-        # 版本：当前分支 + 短 commit（非 git 仓库或失败则未知）
-        git_version = "未知"
-        try:
-            import subprocess as _sp
-            _flags = getattr(_sp, "CREATE_NO_WINDOW", 0)
-            _br = _sp.run(["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
-                          capture_output=True, text=True, timeout=5, creationflags=_flags)
-            _sh = _sp.run(["git", "-C", str(path), "rev-parse", "--short", "HEAD"],
-                          capture_output=True, text=True, timeout=5, creationflags=_flags)
-            if _br.returncode == 0 and _sh.returncode == 0:
-                _branch = _br.stdout.strip() or "?"
-                _short = _sh.stdout.strip() or "?"
-                git_version = f"{_branch} · {_short}"
-        except Exception:
-            git_version = "未知"
+        """组装项目统计展示数据。
 
+        本地部分（文件数/大小/分支）只读缓存：没缓存或已过期时先给占位值，
+        并启动后台线程补算——os.walk 和 git 调用绝不在 UI 线程里跑，
+        否则大项目/网络盘会把界面卡住几秒。
+        """
+        cached = self._stats_cache.get(project.project_id)
+        if cached is not None and _time.time() - cached[0] <= self._stats_ttl:
+            local = cached[1]
+        else:
+            local = {
+                "created_at": "统计中…",
+                "file_count": "…",
+                "total_size": "统计中…",
+                "git_version": "…",
+            }
+            self._start_stats_worker(project)
+        return self._merged_stats(project, local)
+
+    def _merged_stats(self, project: ProjectConfig, local: dict) -> dict:
+        """缓存中的本地统计 + 实时渠道状态摘要，合成详情弹窗要展示的完整数据。"""
         result = self.results.get(project.project_id) or {}
         remote_results = result.get("remotes", {})
         summary_lines = []
@@ -1701,12 +1697,36 @@ class MainWindow(QMainWindow):
                 f"<br><span style='color:#A9B5C8'>commit：{html.escape(latest)}</span>"
             )
         return {
-            "created_at": created_at,
-            "file_count": file_count,
-            "total_size": size_text,
-            "git_version": git_version,
+            "created_at": local.get("created_at"),
+            "file_count": local.get("file_count"),
+            "total_size": local.get("total_size"),
+            "git_version": local.get("git_version"),
             "git_summary_html": "<br>".join(summary_lines),
         }
+
+    def _start_stats_worker(self, project: ProjectConfig, on_ready=None) -> None:
+        """后台统计项目本地信息；同一项目已在统计中就不重复开线程。"""
+        if not project.workspace_path:
+            return
+        for worker in self._stats_workers:
+            if worker.project_id == project.project_id and worker.isRunning():
+                return
+        worker = ProjectStatsWorker(project.project_id, project.workspace_path)
+        # 连接顺序有讲究：先更新缓存，on_ready 里读到的就是新数据
+        worker.stats_ready.connect(self._on_stats_ready)
+        if on_ready is not None:
+            worker.stats_ready.connect(on_ready)
+        worker.finished.connect(self._on_stats_worker_finished)
+        self._stats_workers.append(worker)
+        worker.start()
+
+    def _on_stats_ready(self, project_id: str, stats: dict) -> None:
+        self._stats_cache[project_id] = (_time.time(), stats)
+
+    def _on_stats_worker_finished(self) -> None:
+        worker = self.sender()
+        if worker in self._stats_workers:
+            self._stats_workers.remove(worker)
 
     def _open_project_detail(self, item: QListWidgetItem, _column: int = 0) -> None:
         project_id = item.data(Qt.ItemDataRole.UserRole)
@@ -1717,6 +1737,16 @@ class MainWindow(QMainWindow):
         detail = ProjectDetailDialog(project, self._project_stats(project), self._project_icon(project), self)
         detail.sync_requested.connect(lambda: self._sync_from_project_detail(detail))
         detail.delete_requested.connect(lambda: self._delete_from_project_detail(detail, project))
+
+        # 后台统计完成后，详情窗若还开着就原地刷新数值（缓存已在 _on_stats_ready 更新）
+        def _apply_local_stats(pid: str, _stats: dict) -> None:
+            if pid != project.project_id:
+                return
+            cached = self._stats_cache.get(pid)
+            if cached and _qobj_alive(detail) and detail.isVisible():
+                detail.update_stats(self._merged_stats(project, cached[1]))
+
+        self._start_stats_worker(project, _apply_local_stats)
         detail.exec()
 
     def _sync_from_project_detail(self, detail: ProjectDetailDialog) -> None:
@@ -3838,6 +3868,8 @@ class MainWindow(QMainWindow):
         if key == "__staging__":
             refresh_action = menu.addAction("单独刷新")
             refresh_action.triggered.connect(lambda: self._refresh_single_channel(key))
+            history_action = menu.addAction("查看提交历史")
+            history_action.triggered.connect(lambda: self._open_commit_history("__staging__"))
             menu.addSeparator()
             open_dir_action = menu.addAction("打开项目目录")
             open_dir_action.triggered.connect(self.open_local)
@@ -3853,6 +3885,8 @@ class MainWindow(QMainWindow):
             pull_action.triggered.connect(lambda: self._pull_single_channel(key))
             refresh_action = menu.addAction("单独刷新")
             refresh_action.triggered.connect(lambda: self._refresh_single_channel(key))
+            history_action = menu.addAction("查看提交历史")
+            history_action.triggered.connect(lambda: self._open_commit_history(key))
             menu.addSeparator()
             if remote.kind != "local" and remote.url:
                 browser_action = menu.addAction("在浏览器打开仓库")
@@ -3869,6 +3903,145 @@ class MainWindow(QMainWindow):
             terminal_action.triggered.connect(self.open_terminal)
 
         menu.exec(global_pos)
+
+    def _open_commit_history(self, key: str) -> None:
+        """打开提交历史弹窗：后台同时加载本地工作区和所有渠道的历史。"""
+        project = self._current_project()
+        if not project:
+            return
+        if not project.workspace_path:
+            QMessageBox.information(self, "提交历史", "这个项目还没有配置工作区目录。")
+            return
+        if self._history_worker is not None and self._history_worker.isRunning():
+            self._append_log("提交历史正在加载，请稍候。")
+            return
+        telemetry.track("查看提交历史")
+        dialog = CommitHistoryDialog(project, self)
+        dialog.refresh_requested.connect(lambda: self._start_history_worker(project, dialog))
+        dialog.load_more_requested.connect(
+            lambda key, count: self._start_load_more_worker(project, dialog, key, count)
+        )
+        dialog.restore_requested.connect(
+            lambda commit: self._confirm_restore_commit(dialog, project, commit)
+        )
+        # 「当前」标记的语义 = 工作区实际停留在哪个提交：所有渠道统一用
+        # 工作区 HEAD，而不是各渠道自己的顶端提交。若按渠道顶端打标，
+        # 每个渠道列表顶部那行永远是绿色「当前」，会让人误以为工作区
+        # 就在这个版本，进而质疑「待拉取」徽章。远程渠道的顶端提交
+        # 另用蓝色「远程最新」标签区分，落后时一眼能看出差距。
+        result = self.results.get(project.project_id) or {}
+        local_head = str((result.get("local") or {}).get("head") or "")
+        heads: dict[str, str] = {}
+        remote_tips: dict[str, str] = {}
+        if local_head:
+            heads["__workspace__"] = local_head
+        for remote_key, remote_data in (result.get("remotes") or {}).items():
+            if local_head:
+                heads[str(remote_key)] = local_head
+            remote_head = str((remote_data or {}).get("head") or "")
+            if remote_head:
+                remote_tips[str(remote_key)] = remote_head
+        dialog.set_current_heads(heads)
+        dialog.set_remote_tips(remote_tips)
+        self._start_history_worker(project, dialog)
+        dialog.select_channel("__workspace__" if key == "__staging__" else key)
+        dialog.exec()
+
+    def _start_history_worker(self, project: ProjectConfig, dialog: CommitHistoryDialog) -> None:
+        if self._history_worker is not None and self._history_worker.isRunning():
+            self._append_log("提交历史正在加载，请稍候。")
+            return
+        worker = CommitHistoryWorker(project, dict(project.remotes))
+        worker.channel_history.connect(dialog.set_history)
+        worker.history_failed.connect(dialog.set_error)
+        worker.completed.connect(self._on_history_completed)
+        self._history_worker = worker
+        worker.start()
+
+    def _on_history_completed(self) -> None:
+        self._history_worker = None
+
+    def _start_load_more_worker(
+        self, project: ProjectConfig, dialog: CommitHistoryDialog, key: str, loaded_count: int
+    ) -> None:
+        """按需加载某一渠道的下一页提交（弹窗底部「加载更多」按钮触发）。"""
+        if self._load_more_worker is not None and self._load_more_worker.isRunning():
+            return
+        if self._history_worker is not None and self._history_worker.isRunning():
+            return
+        telemetry.track("加载更多提交")
+        worker = CommitHistoryWorker(
+            project, dict(project.remotes), more_key=key, more_skip=loaded_count
+        )
+        worker.history_more.connect(dialog.append_history)
+        worker.history_failed.connect(dialog.set_error)
+        worker.completed.connect(self._on_load_more_completed)
+        self._load_more_worker = worker
+        worker.start()
+
+    def _on_load_more_completed(self) -> None:
+        self._load_more_worker = None
+
+    def _confirm_restore_commit(self, dialog: CommitHistoryDialog, project: ProjectConfig, commit: dict) -> None:
+        """恢复前的确认弹窗：把会发生什么一条条讲清楚，再让用户点头。"""
+        if self._restore_worker is not None and self._restore_worker.isRunning():
+            return
+        if self.sync_worker and self.sync_worker.isRunning():
+            QMessageBox.warning(self, "恢复版本", "同步正在进行，请等同步结束再恢复版本。")
+            return
+        if self.worker and self.worker.isRunning():
+            QMessageBox.warning(self, "恢复版本", "状态刷新正在进行，请稍候再恢复版本。")
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("恢复工作区到此版本")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            f"把项目文件恢复到这个提交？\n\n"
+            f"{commit.get('date', '')} · {commit.get('author', '')}\n"
+            f"{commit.get('short', '')} · {commit.get('subject', '')}"
+        )
+        box.setInformativeText(
+            "恢复后：\n"
+            "· Git 已跟踪的文件会回到这个提交的状态\n"
+            "· 如果有未提交的修改，会先把整个项目目录自动备份一份再恢复\n"
+            "· 自己新增的、还没提交过的文件（素材等）不受影响\n"
+            "· 本地分支会暂时指向这个提交，之后点「拉取到本地」即可回到最新"
+        )
+        restore_btn = box.addButton("恢复到这个版本", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is not restore_btn:
+            return
+        self._append_log(f"开始恢复工作区到提交 {commit.get('short', '')}…")
+        self._show_busy_dialog("正在恢复工作区")
+        self._set_progress_style("running")
+        self._restore_worker = RestoreCommitWorker(project, str(commit.get("hash")))
+        self._restore_worker.result_ready.connect(self._on_restore_result)
+        self._restore_worker.failed.connect(self._on_restore_failed)
+        self._restore_worker.completed.connect(self._on_restore_completed)
+        self._restore_worker.start()
+
+    def _on_restore_result(self, result: dict) -> None:
+        self._hide_busy_dialog()
+        backup = str(result.get("backup_path") or "")
+        if backup:
+            self._append_log(f"恢复完成。恢复前的修改已备份到：{backup}")
+            QMessageBox.information(
+                self, "恢复完成",
+                f"工作区已恢复到所选版本。\n\n恢复前的修改已备份到：\n{backup}",
+            )
+        else:
+            self._append_log("恢复完成。工作区原本是干净的，无需备份。")
+        self.refresh_selected(show_dialog=False)
+
+    def _on_restore_failed(self, reason: str) -> None:
+        self._hide_busy_dialog()
+        self._set_progress_style("error")
+        self._append_log(f"恢复失败：{reason}")
+        QMessageBox.warning(self, "恢复失败", reason)
+
+    def _on_restore_completed(self) -> None:
+        self._restore_worker = None
 
     def _push_single_channel(self, key: str, skip_diverge_check: bool = False) -> None:
         project = self._current_project()

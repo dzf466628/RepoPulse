@@ -6,6 +6,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.core.secret_box import decrypt_secret, encrypt_secret
+
 
 @dataclass
 class RemoteConfig:
@@ -30,7 +32,8 @@ class RemoteConfig:
             "branch": self.branch,
             "auth_method": self.auth_method,
             "username": self.username,
-            "secret": self.secret,
+            # 凭据用 DPAPI 加密后落盘；加密不可用时原样返回（退回旧版明文行为）
+            "secret": encrypt_secret(self.secret),
             "ssh_key_path": self.ssh_key_path,
             "enabled": self.enabled,
             "label": self.label,
@@ -46,7 +49,9 @@ class RemoteConfig:
             branch=str(data.get("branch") or ""),
             auth_method=str(data.get("auth_method") or "auto"),
             username=str(data.get("username") or ""),
-            secret=str(data.get("secret") or ""),
+            # 兼容旧版明文：无 dpapi 前缀原样读入，下次保存自动加密迁移；
+            # 密文解不开（换机器/换账户）时返回空串，软件照常启动
+            secret=decrypt_secret(str(data.get("secret") or "")),
             ssh_key_path=str(data.get("ssh_key_path") or ""),
             enabled=bool(data.get("enabled", True)),
             label=str(data.get("label") or ""),

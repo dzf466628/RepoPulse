@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import urllib.request
@@ -66,6 +67,31 @@ def _pick_latest(html: str, base_url: str) -> dict | None:
     if best is None:
         return None
     return {"version": best[1], "url": best[2]}
+
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fetch_expected_sha256(installer_url: str) -> str | None:
+    """尝试获取安装包随附的校验文件（<安装包URL>.sha256，sha256sum 格式）。
+
+    返回小写十六进制校验值；服务器上没有该文件、或内容里解析不出 64 位
+    十六进制值（例如返回的是目录列表 HTML）时返回 None——视为"发布方尚未
+    提供校验"，由调用方决定是否放行。
+    """
+    checksum_url = installer_url.rstrip("/") + ".sha256"
+    try:
+        with _open(checksum_url, CHECK_TIMEOUT, accept="text/plain") as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001 - 404/网络抖动都按"无校验文件"处理
+        return None
+    match = re.search(r"\b([a-fA-F0-9]{64})\b", text)
+    return match.group(1).lower() if match else None
 
 
 class UpdateCheckThread(QThread):
@@ -148,6 +174,23 @@ class UpdateDownloadThread(QThread):
                         self.progress.emit(done, total)
             if os.path.getsize(target) == 0:
                 raise OSError("下载文件为空")
+            # 完整性校验：发布目录里如果同时上传了 <安装包>.sha256（打包脚本会自动
+            # 生成），下载结果必须与之一致才允许安装——哈希对不上就删包中止，
+            # 防止被劫持/损坏的安装包被静默执行。没有校验文件时保持旧行为放行。
+            expected = _fetch_expected_sha256(self._url)
+            if expected is not None:
+                actual = _sha256_file(target)
+                if actual != expected:
+                    try:
+                        os.remove(target)
+                    except OSError:
+                        pass
+                    self.download_failed.emit(
+                        "安装包完整性校验失败（SHA256 不一致），已中止安装。\n"
+                        "这通常意味着下载不完整或文件被篡改。\n"
+                        "请稍后重试，或到官网手动下载安装包。"
+                    )
+                    return
             self.download_finished.emit(target)
         except Exception as exc:  # noqa: BLE001
             self.download_failed.emit(f"{type(exc).__name__}: {exc}")

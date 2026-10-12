@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import uuid
 from pathlib import Path
 from urllib.parse import urlparse
@@ -15,6 +16,7 @@ from PyQt6.QtGui import (
 )
 from PyQt6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QComboBox,
     QCheckBox,
     QAbstractSpinBox,
@@ -35,6 +37,8 @@ from PyQt6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QTextBrowser,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -85,7 +89,7 @@ def confirm_delete_dialog(
     box.exec()
     return box.clickedButton() is yes
 from app.models import ProjectConfig, RemoteConfig
-from app.ui.theme import ACCENT_COLOR, ACCENT_HOVER, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
+from app.ui.theme import ACCENT_COLOR, ACCENT_DARK, ACCENT_HOVER, BORDER_COLOR, PANEL_COLOR, PANEL_RAISED, SPACE_1, SPACE_2, SPACE_4
 
 
 # ------------------------------------------------------------ Jelly 复选框
@@ -364,16 +368,19 @@ class ProjectDetailDialog(QDialog):
         info_layout = QFormLayout(info)
         info_layout.setContentsMargins(SPACE_2, SPACE_2, SPACE_2, SPACE_2)
         info_layout.setSpacing(SPACE_1)
-        for label, value in (
-            ("项目目录", str(project.workspace_path)),
-            ("创建日期", str(stats.get("created_at") or "未知")),
-            ("文件数", f"{stats.get('file_count', 0)} 个"),
-            ("当前总大小", str(stats.get("total_size") or "0 B")),
+        # 记录数值标签，供 update_stats 在后台统计完成后原地刷新
+        self._stat_labels: dict[str, QLabel] = {}
+        for key, label, value in (
+            ("workspace", "项目目录", str(project.workspace_path)),
+            ("created_at", "创建日期", str(stats.get("created_at") or "未知")),
+            ("file_count", "文件数", f"{stats.get('file_count', 0)} 个"),
+            ("total_size", "当前总大小", str(stats.get("total_size") or "0 B")),
         ):
             value_label = QLabel(value)
             value_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             value_label.setWordWrap(True)
             info_layout.addRow(label, value_label)
+            self._stat_labels[key] = value_label
 
         git_title = QLabel("已连接 Git 与最新提交")
         git_title.setStyleSheet("font-weight: 600; color: #E8ECF2;")
@@ -382,6 +389,7 @@ class ProjectDetailDialog(QDialog):
         git_list.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         git_list.setHtml(str(stats.get("git_summary_html") or "<span>暂无 Git 渠道</span>"))
         git_list.setMinimumHeight(180)
+        self._git_list = git_list
 
         delete_button = QPushButton("删除项目")
         delete_button.setFixedHeight(30)
@@ -414,6 +422,18 @@ class ProjectDetailDialog(QDialog):
         layout.addWidget(git_title)
         layout.addWidget(git_list, 1)
         layout.addLayout(footer)
+
+    def update_stats(self, stats: dict) -> None:
+        """后台统计完成后原地刷新数值（对话框保持打开时由主窗口调用）。"""
+        for key, text in (
+            ("created_at", str(stats.get("created_at") or "未知")),
+            ("file_count", f"{stats.get('file_count', 0)} 个"),
+            ("total_size", str(stats.get("total_size") or "0 B")),
+        ):
+            label = self._stat_labels.get(key)
+            if label is not None:
+                label.setText(text)
+        self._git_list.setHtml(str(stats.get("git_summary_html") or "<span>暂无 Git 渠道</span>"))
 
     def _confirm_delete(self) -> None:
         if not confirm_delete_dialog(
@@ -1648,12 +1668,16 @@ class GitDialog(QDialog):
             if not Path(location).is_dir():
                 QMessageBox.warning(self, "目录不存在", "请选择已经存在的 Local Git 项目集合目录。")
                 return
+            # 扫描集合目录可能涉及网络盘，耗时不确定；挂等待光标让用户知道在干活
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
             try:
                 self.discovered_repositories = GitService().discover_repositories(location)
             except GitCommandError:
                 # A new installation may intentionally point at an empty
                 # collection directory before the first project is created.
                 self.discovered_repositories = []
+            finally:
+                QApplication.restoreOverrideCursor()
         self.accept()
 
     def get_discovered_repositories(self) -> list[dict]:
@@ -1817,3 +1841,349 @@ class DivergeResolveDialog(QDialog):
             if btn.isChecked():
                 return key
         return "merge"
+
+
+class CommitHistoryDialog(QDialog):
+    """提交历史查看器：分渠道展示过去的提交（hash/作者/时间/说明）。
+
+    选中一条后可以请求「恢复工作区到此版本」——真正执行前的确认、备份和
+    git reset 都由主窗口负责，这个弹窗只负责展示和转发意图。
+    """
+
+    restore_requested = pyqtSignal(dict)  # 选中的 commit dict
+    # 「加载更多」：channel_key, 当前已加载条数（作为 git log --skip 偏移）
+    load_more_requested = pyqtSignal(str, int)
+
+    PAGE_SIZE = 100  # 每页条数，与 CommitHistoryWorker 的默认 limit 一致
+
+    def __init__(self, project: ProjectConfig, parent=None):
+        super().__init__(parent)
+        self._project = project
+        self._current_key = ""
+        self._history: dict[str, tuple[str, list]] = {}   # key -> (label, commits)
+        self._errors: dict[str, tuple[str, str]] = {}     # key -> (label, reason)
+        self._exhausted: set[str] = set()                 # 已翻到底的渠道
+        self._loading_more = False
+        self.setWindowTitle(f"提交历史 · {project.name}")
+        self.resize(660, 640)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(SPACE_4, SPACE_4, SPACE_4, SPACE_4)
+        root.setSpacing(SPACE_2)
+
+        # 全局主题给 QPushButton 设了 min-height，会压过 setFixedSize，
+        # 导致同一行按钮高矮不一；这三个按钮用自己的样式（无 min-height）锁高
+        neutral_btn_style = (
+            "QPushButton { background: #2E3D50; border: 1px solid #3E5068; border-radius: 4px;"
+            " color: #E8ECF2; padding: 0 12px; font-size: 13px; }"
+            "QPushButton:hover { background: #3A4C64; border-color: #56718F; }"
+            "QPushButton:pressed { background: #263444; }"
+        )
+
+        top = QHBoxLayout()
+        top.setSpacing(SPACE_1)
+        channel_title = QLabel("渠道：")
+        channel_title.setStyleSheet("color: #E8ECF2; font-weight: 600; font-size: 13px;")
+        self.channel_combo = QComboBox()
+        self.channel_combo.setFixedHeight(30)
+        self.channel_combo.setMinimumWidth(220)
+        self.channel_combo.setStyleSheet(
+            f"QComboBox {{ background: {PANEL_RAISED}; border: 1px solid {BORDER_COLOR};"
+            " border-radius: 4px; padding: 0 8px; color: #E8ECF2; font-size: 13px; }"
+            f"QComboBox::drop-down {{ border: 0; width: 22px; }}"
+            "QComboBox QAbstractItemView { background: #243244; color: #E8ECF2;"
+            " selection-background-color: #2E4258; }"
+        )
+        self.channel_combo.currentIndexChanged.connect(self._on_channel_changed)
+        self.btn_refresh = QPushButton("刷新")
+        self.btn_refresh.setFixedSize(64, 30)
+        self.btn_refresh.setStyleSheet(neutral_btn_style)
+        self.btn_refresh.clicked.connect(self.refresh_requested.emit)
+        top.addWidget(channel_title)
+        top.addWidget(self.channel_combo, 1)
+        top.addWidget(self.btn_refresh)
+        root.addLayout(top)
+
+        # 「当前」= 工作区停留的提交（所有渠道统一）；「远程最新」=
+        # 该渠道自己的顶端提交，两者可能不同（工作区落后时正好解释徽章）
+        self._current_heads: dict[str, str] = {}
+        self._remote_tips: dict[str, str] = {}
+
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(["提交说明", "作者", "时间", "版本号"])
+        self.tree.setRootIsDecorated(False)
+        # 不用系统的交替行色：默认调色板是浅色的，深色窗口里会出现
+        # 「浅底深字/深底浅字」随机混排，文字几乎看不清
+        self.tree.setAlternatingRowColors(False)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.itemSelectionChanged.connect(self._on_selection_changed)
+        self.tree.itemDoubleClicked.connect(lambda _item, _col: self._emit_restore())
+        # 内容超宽时让文字省略号截断，不出横向滚动条
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.tree.setStyleSheet(
+            f"QTreeWidget {{ background: {PANEL_COLOR}; border: 1px solid {BORDER_COLOR};"
+            " border-radius: 5px; color: #E8ECF2; font-size: 13px; }"
+            "QTreeWidget::item { height: 34px; border: 0; }"
+            "QTreeWidget::item:hover { background: #26364A; }"
+            f"QTreeWidget::item:selected {{ background: {ACCENT_DARK}; color: #ffffff; }}"
+            "QHeaderView::section { background: #243244; color: #A9B5C8;"
+            " border: 0; border-right: 1px solid #1A2532; border-bottom: 1px solid #1A2532;"
+            " padding: 6px 8px; font-size: 12px; }"
+        )
+        header = self.tree.header()
+        header.setFixedHeight(32)
+        header.resizeSection(0, 320)
+        header.resizeSection(1, 100)
+        header.resizeSection(2, 150)
+        header.setStretchLastSection(True)
+        root.addWidget(self.tree, 1)
+
+        self.empty_label = QLabel("正在加载提交历史…")
+        self.empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_label.setStyleSheet("color: #A9B5C8; font-size: 13px;")
+        self.empty_label.hide()
+        root.addWidget(self.empty_label)
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(SPACE_1)
+        hint = QLabel("选中一条提交后可恢复；双击同效。恢复只改 Git 已跟踪的文件。")
+        hint.setStyleSheet("color: #A9B5C8; font-size: 12px;")
+        hint.setWordWrap(True)
+        self.btn_restore = QPushButton("恢复工作区到此版本…")
+        self.btn_restore.setFixedHeight(30)
+        self.btn_restore.setEnabled(False)
+        self.btn_restore.setStyleSheet(
+            "QPushButton { background: #7A5230; border: 1px solid #A97044; border-radius: 4px;"
+            " color: #FFEFDD; padding: 0 14px; font-size: 13px; }"
+            "QPushButton:hover { background: #A97044; border-color: #F5C26B; }"
+            "QPushButton:pressed { background: #5D3B22; }"
+            "QPushButton:disabled { background: #3A4656; border-color: #46546A; color: #6B7684; }"
+        )
+        self.btn_restore.clicked.connect(self._emit_restore)
+        self.btn_more = QPushButton("加载更多")
+        self.btn_more.setFixedHeight(30)
+        self.btn_more.setStyleSheet(neutral_btn_style)
+        self.btn_more.setToolTip(f"继续加载更早的提交（每次 {self.PAGE_SIZE} 条）")
+        self.btn_more.clicked.connect(self._on_load_more_clicked)
+        self.btn_more.hide()
+        close_btn = QPushButton("关闭")
+        close_btn.setFixedSize(76, 30)
+        close_btn.setStyleSheet(neutral_btn_style)
+        close_btn.clicked.connect(self.reject)
+        bottom.addWidget(hint, 1)
+        bottom.addWidget(self.btn_more)
+        bottom.addWidget(self.btn_restore)
+        bottom.addWidget(close_btn)
+        root.addLayout(bottom)
+
+    refresh_requested = pyqtSignal()
+
+    # ---- 数据入口（主窗口把 worker 信号接到这三个槽） ----
+
+    def set_history(self, key: str, label: str, commits: list) -> None:
+        self._errors.pop(key, None)
+        # 全量刷新意味着该渠道重新从第一页开始
+        self._exhausted.discard(key)
+        self._history[key] = (label, commits)
+        self._rebuild_combo()
+        if self._current_key == key or not self._current_key:
+            if not self._current_key:
+                self._current_key = key
+            self._render()
+
+    def set_error(self, key: str, label: str, reason: str) -> None:
+        self._errors[key] = (label, reason)
+        self._loading_more = False
+        self._rebuild_combo()
+        if self._current_key == key or not self._current_key:
+            if not self._current_key:
+                self._current_key = key
+            self._render()
+
+    def _on_load_more_clicked(self) -> None:
+        key = self._current_key
+        entry = self._history.get(key)
+        if not entry or self._loading_more:
+            return
+        self._loading_more = True
+        self._update_more_button()
+        self.load_more_requested.emit(key, len(entry[1]))
+
+    def append_history(self, key: str, label: str, commits: list, has_more: bool) -> None:
+        """「加载更多」的回包：追加到该渠道已有历史的末尾。"""
+        self._loading_more = False
+        if not has_more:
+            self._exhausted.add(key)
+        entry = self._history.get(key)
+        if entry is None:
+            self._history[key] = (label, list(commits))
+        else:
+            self._history[key] = (entry[0], entry[1] + list(commits))
+        if self._current_key == key:
+            self._render()
+        else:
+            self._update_more_button()
+
+    def _update_more_button(self) -> None:
+        entry = self._history.get(self._current_key)
+        show = (
+            entry is not None
+            and len(entry[1]) >= self.PAGE_SIZE
+            and self._current_key not in self._exhausted
+            and not self._loading_more
+        )
+        self.btn_more.setVisible(show)
+        if self._loading_more:
+            self.btn_more.setText("加载中…")
+            self.btn_more.setEnabled(False)
+        else:
+            self.btn_more.setText("加载更多")
+            self.btn_more.setEnabled(True)
+
+    def set_current_heads(self, heads: dict) -> None:
+        """记录工作区当前所在的完整 hash（各渠道共用），用于「当前」标记。"""
+        self._current_heads = {str(k): str(v) for k, v in (heads or {}).items() if v}
+        self._render()
+
+    def set_remote_tips(self, tips: dict) -> None:
+        """记录各渠道自己的顶端提交 hash，用于蓝色「远程最新」标记。"""
+        self._remote_tips = {str(k): str(v) for k, v in (tips or {}).items() if v}
+        self._render()
+
+    def select_channel(self, key: str) -> None:
+        index = self.channel_combo.findData(key)
+        if index >= 0:
+            self.channel_combo.setCurrentIndex(index)
+        else:
+            self._current_key = key
+            self._render()
+
+    def _rebuild_combo(self) -> None:
+        wanted = self._current_key
+        self.channel_combo.blockSignals(True)
+        self.channel_combo.clear()
+        keys = list(self._history.keys()) + [k for k in self._errors if k not in self._history]
+        for key in keys:
+            label = (self._history.get(key) or self._errors.get(key, ("", "")))[0]
+            self.channel_combo.addItem(label, key)
+        if wanted:
+            index = self.channel_combo.findData(wanted)
+            if index >= 0:
+                self.channel_combo.setCurrentIndex(index)
+        self.channel_combo.blockSignals(False)
+
+    def _on_channel_changed(self, _index: int) -> None:
+        self._current_key = str(self.channel_combo.currentData() or "")
+        self._render()
+
+    def _render(self) -> None:
+        # 显式摘掉旧的自绘标签再清空：tree.clear() 对 item widget 走
+        # deleteLater（异步），新旧两批标签会短暂同时显示，肉眼就是"重影"
+        for i in range(self.tree.topLevelItemCount()):
+            old_item = self.tree.topLevelItem(i)
+            old_widget = self.tree.itemWidget(old_item, 0)
+            if old_widget is not None:
+                self.tree.removeItemWidget(old_item, 0)
+                old_widget.deleteLater()
+        self.tree.clear()
+        entry = self._history.get(self._current_key)
+        error = self._errors.get(self._current_key)
+        if entry is None and error is None:
+            self.empty_label.setText("正在加载提交历史…")
+            self.empty_label.show()
+            self.btn_restore.setEnabled(False)
+            self.btn_more.hide()
+            return
+        label = (entry or error)[0]
+        if error is not None and entry is None:
+            reason = error[1]
+            if "does not have any commits yet" in reason or "unknown revision" in reason:
+                self.empty_label.setText(f"{label}：还没有任何提交")
+            else:
+                self.empty_label.setText(f"{label}：加载失败\n{reason}")
+            self.empty_label.show()
+            self.btn_restore.setEnabled(False)
+            self.btn_more.hide()
+            return
+        commits = entry[1]
+        if not commits:
+            self.empty_label.setText(f"{label}：还没有任何提交")
+            self.empty_label.show()
+            self.btn_restore.setEnabled(False)
+            self.btn_more.hide()
+            return
+        self.empty_label.hide()
+        workspace_head = self._current_heads.get(self._current_key, "")
+        remote_tip = self._remote_tips.get(self._current_key, "")
+        self._update_more_button()
+        for commit in commits:
+            item = QTreeWidgetItem([commit.get("subject", ""), commit.get("author", ""),
+                                    commit.get("date", ""), commit.get("short", "")])
+            item.setToolTip(0, commit.get("subject", ""))
+            # 每列显式设色，不依赖调色板：深色窗口里文字必须始终可读
+            item.setForeground(0, QColor("#F2F6FA"))
+            item.setForeground(1, QColor("#A9B5C8"))
+            item.setForeground(2, QColor("#A9B5C8"))
+            is_current = bool(workspace_head) and commit.get("hash") == workspace_head
+            is_remote_tip = bool(remote_tip) and commit.get("hash") == remote_tip
+            if is_current:
+                # 当前版本：版本号显示绿色
+                item.setForeground(3, QColor("#70D6A5"))
+            else:
+                item.setForeground(3, QColor(ACCENT_COLOR))
+            item.setData(0, Qt.ItemDataRole.UserRole, commit)
+            self.tree.addTopLevelItem(item)
+            if is_current or is_remote_tip:
+                # 文字由控件容器绘制，清掉 item 自身文字避免叠出重影
+                item.setText(0, "")
+                # holder 必须完全透明 + 鼠标穿透：不透明的话会把树画的
+                # 选中高光盖住（有标签那行选中时看不到高亮），也会吃掉
+                # 本该属于行的点击
+                holder = QWidget()
+                holder.setStyleSheet("background: transparent;")
+                holder.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                row_lay = QHBoxLayout(holder)
+                row_lay.setContentsMargins(0, 0, 6, 0)
+                row_lay.setSpacing(6)
+                text_label = QLabel(html.escape(commit.get("subject", "")))
+                text_label.setStyleSheet("background: transparent; color: #F2F6FA; font-size: 13px;")
+                if is_current:
+                    pill = QLabel("当前")
+                    pill_style = (
+                        "QLabel { background-color: #2E8B57; color: #ffffff;"
+                        " border-radius: 9px; padding: 0 9px; font-size: 11px; }"
+                    )
+                else:
+                    pill = QLabel("远程最新")
+                    pill_style = (
+                        "QLabel { background-color: #2E5D8B; color: #ffffff;"
+                        " border-radius: 9px; padding: 0 9px; font-size: 11px; }"
+                    )
+                pill.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                # 固定高度并居中：否则 QLabel 会撑满 34px 的整行，顶天立地
+                pill.setFixedHeight(18)
+                pill.setStyleSheet(pill_style)
+                row_lay.addWidget(text_label)
+                row_lay.addWidget(pill, 0, Qt.AlignmentFlag.AlignVCenter)
+                row_lay.addStretch(1)
+                self.tree.setItemWidget(item, 0, holder)
+
+    def _on_selection_changed(self) -> None:
+        selected = self.tree.selectedItems()
+        # 必须显式转 bool：selectedItems() 为空时返回空列表，
+        # setEnabled([]) 在 PyQt6 下是类型错误，直接把程序带崩
+        enabled = bool(selected) and bool(
+            (selected[0].data(0, Qt.ItemDataRole.UserRole) or {}).get("hash")
+        )
+        self.btn_restore.setEnabled(enabled)
+
+    def _emit_restore(self) -> None:
+        selected = self.tree.selectedItems()
+        if not selected:
+            return
+        commit = selected[0].data(0, Qt.ItemDataRole.UserRole)
+        if commit and commit.get("hash"):
+            self.restore_requested.emit(dict(commit))

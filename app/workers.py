@@ -3,10 +3,100 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from app.core.git_service import GitService
 from app.models import ProjectConfig, RemoteConfig
+
+
+def compute_local_stats(workspace_path: str, git_exe: str = "git") -> dict:
+    """统计工作区本地信息：文件数、总大小、目录创建时间、当前分支与短 hash。
+
+    纯文件/git 操作，不含任何 Qt 对象；os.walk 会完整遍历大项目/网络盘，
+    必须放在后台线程调用，UI 线程直接调会卡界面。
+    """
+    path = Path(workspace_path).expanduser()
+    file_count = 0
+    total_bytes = 0
+    if path.is_dir():
+        try:
+            for root, directories, files in os.walk(path):
+                directories[:] = [item for item in directories if item != ".git"]
+                for filename in files:
+                    try:
+                        total_bytes += (Path(root) / filename).stat().st_size
+                        file_count += 1
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+    if total_bytes < 1024:
+        size_text = f"{total_bytes} B"
+    elif total_bytes < 1024 * 1024:
+        size_text = f"{total_bytes / 1024:.1f} KB"
+    elif total_bytes < 1024 * 1024 * 1024:
+        size_text = f"{total_bytes / (1024 * 1024):.1f} MB"
+    else:
+        size_text = f"{total_bytes / (1024 * 1024 * 1024):.1f} GB"
+    try:
+        created_at = datetime.fromtimestamp(path.stat().st_ctime).strftime("%Y-%m-%d %H:%M")
+    except OSError:
+        created_at = "未知"
+    git_version = "未知"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        _br = subprocess.run(
+            [git_exe, "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=5, creationflags=flags,
+        )
+        _sh = subprocess.run(
+            [git_exe, "-C", str(path), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, creationflags=flags,
+        )
+        if _br.returncode == 0 and _sh.returncode == 0:
+            git_version = f"{_br.stdout.strip() or '?'} · {_sh.stdout.strip() or '?'}"
+    except Exception:
+        git_version = "未知"
+    return {
+        "created_at": created_at,
+        "file_count": file_count,
+        "total_size": size_text,
+        "git_version": git_version,
+    }
+
+
+class ProjectStatsWorker(QThread):
+    """后台统计单个项目的本地信息（文件数/总大小/当前分支）。
+
+    为什么要单独一个线程：项目详情和暂存区卡片每次打开都会统计一遍，
+    大项目或网络盘上 os.walk + git 调用能把 UI 线程卡住好几秒。
+    """
+
+    stats_ready = pyqtSignal(str, dict)  # project_id, stats
+    failed = pyqtSignal(str, str)        # project_id, reason
+
+    def __init__(self, project_id: str, workspace_path: str, parent=None):
+        super().__init__(parent)
+        self.project_id = project_id
+        self._workspace_path = workspace_path
+
+    def run(self) -> None:
+        try:
+            git_exe = "git"
+            try:
+                git_exe = GitService().git  # 优先用内置/已定位的那份 Git
+            except Exception:
+                pass
+            self.stats_ready.emit(
+                self.project_id, compute_local_stats(self._workspace_path, git_exe)
+            )
+        except Exception as exc:  # pragma: no cover - 最后一道线程保护
+            self.failed.emit(self.project_id, f"{type(exc).__name__}: {exc}")
 
 
 class StatusWorker(QThread):
@@ -498,3 +588,121 @@ class CompleteRepoWorker(QThread):
             self.completed.emit(tgt)
         except Exception as exc:  # pragma: no cover
             self.failed.emit(str(exc))
+
+
+class CommitHistoryWorker(QThread):
+    """后台加载各渠道的提交历史。
+
+    每个渠道一个信号：本地工作区直接 log HEAD；远端渠道先 fetch（只更新
+    元数据、绝不动工作区）再 log FETCH_HEAD；本地 Git 渠道读它的备份仓库。
+    某个渠道失败不影响其他渠道，结果逐个发回。
+    """
+
+    channel_history = pyqtSignal(str, str, list)  # channel_key, label, commits
+    history_failed = pyqtSignal(str, str, str)    # channel_key, label, reason
+    # 「加载更多」结果：channel_key, label, commits, has_more(取满一页说明可能还有)
+    history_more = pyqtSignal(str, str, list, bool)
+    completed = pyqtSignal()
+
+    def __init__(
+        self,
+        project: ProjectConfig,
+        remotes: dict[str, RemoteConfig],
+        limit: int = 100,
+        more_key: str = "",
+        more_skip: int = 0,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.project = project
+        self.remotes = remotes
+        self.limit = limit
+        # more_key 非空时进入「加载更多」模式：只加载这一个渠道、
+        # 从 more_skip 条开始的一页，不再全量刷新其他渠道
+        self.more_key = more_key
+        self.more_skip = more_skip
+
+    def _load_channel(self, service: "GitService", key: str, remote: RemoteConfig | None) -> list[dict]:
+        if remote is None:  # 本地工作区
+            return service.commit_history(self.project.workspace_path, "HEAD", self.limit, skip=self.more_skip)
+        if remote.kind == "local":
+            if not remote.path:
+                raise RuntimeError("未配置本地 Git 渠道路径")
+            channel_path = service.local_channel_path(remote, self.project)
+            if not Path(channel_path).is_dir():
+                raise RuntimeError("本地 Git 渠道还没有备份仓库")
+            return service.commit_history(channel_path, "HEAD", self.limit, skip=self.more_skip)
+        return service.remote_commit_history(self.project, remote, self.limit, skip=self.more_skip)
+
+    def run(self) -> None:
+        try:
+            service = GitService()
+            if self.more_key:
+                # —— 加载更多模式：单渠道分页 ——
+                if self.more_key == "__workspace__":
+                    label = "本地工作区"
+                    try:
+                        commits = self._load_channel(service, self.more_key, None)
+                        has_more = len(commits) >= self.limit
+                        self.history_more.emit(self.more_key, label, commits, has_more)
+                    except Exception as exc:  # noqa: BLE001
+                        self.history_failed.emit(self.more_key, label, str(exc))
+                else:
+                    remote = self.remotes.get(self.more_key)
+                    if remote is None:
+                        return
+                    label = remote.label or {
+                        "local": "本地 Git", "nas": "NAS Gitea", "github": "GitHub",
+                    }.get(remote.kind, "远程 Git")
+                    try:
+                        commits = self._load_channel(service, self.more_key, remote)
+                        has_more = len(commits) >= self.limit
+                        self.history_more.emit(self.more_key, label, commits, has_more)
+                    except Exception as exc:  # noqa: BLE001
+                        self.history_failed.emit(self.more_key, label, str(exc))
+                return
+            # —— 首次全量加载模式 ——
+            try:
+                commits = service.commit_history(self.project.workspace_path, "HEAD", self.limit)
+                self.channel_history.emit("__workspace__", "本地工作区", commits)
+            except Exception as exc:  # noqa: BLE001 - 单渠道失败不拖垮其他渠道
+                self.history_failed.emit("__workspace__", "本地工作区", str(exc))
+            for key, remote in self.remotes.items():
+                label = remote.label or {
+                    "local": "本地 Git", "nas": "NAS Gitea", "github": "GitHub",
+                }.get(remote.kind, "远程 Git")
+                try:
+                    if not remote.enabled:
+                        continue
+                    commits = self._load_channel(service, key, remote)
+                    self.channel_history.emit(key, label, commits)
+                except Exception as exc:  # noqa: BLE001
+                    self.history_failed.emit(key, label, str(exc))
+        finally:
+            self.completed.emit()
+
+
+class RestoreCommitWorker(QThread):
+    """把工作区恢复到指定提交：必要时先整目录备份，再 git reset --hard。
+
+    备份和 reset 都在后台线程跑（robocopy 大目录可能要几十秒），UI 只收结果。
+    """
+
+    result_ready = pyqtSignal(object)  # dict: {backup_path}
+    failed = pyqtSignal(str)
+    completed = pyqtSignal()
+
+    def __init__(self, project: ProjectConfig, commit_hash: str, parent=None):
+        super().__init__(parent)
+        self.project = project
+        self.commit_hash = commit_hash
+
+    def run(self) -> None:
+        try:
+            service = GitService(log=lambda _m: None)
+            result = service.restore_workspace_to_commit(self.project, self.commit_hash)
+            self.result_ready.emit(result)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
+        finally:
+            self.completed.emit()

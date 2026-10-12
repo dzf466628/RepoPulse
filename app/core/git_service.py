@@ -111,6 +111,27 @@ Thumbs.db
 _GITHUB_METRICS_TTL = 30 * 60
 _github_metrics_cache: dict[str, tuple[float, dict]] = {}
 
+# GitHub 默认走本机代理（历史约定端口 11304）。换了代理端口/工具的用户可用
+# 环境变量 REPOPULSE_GITHUB_PROXY 覆盖（例如 http://127.0.0.1:7890）；
+# 不设置时行为与旧版本完全一致。
+DEFAULT_GITHUB_PROXY = "http://127.0.0.1:11304"
+
+
+def github_proxy_url() -> str:
+    """GitHub 代理地址：环境变量 REPOPULSE_GITHUB_PROXY 优先，否则用默认值。"""
+    override = (os.environ.get("REPOPULSE_GITHUB_PROXY") or "").strip()
+    return override or DEFAULT_GITHUB_PROXY
+
+
+def _github_proxy_host_port() -> tuple[str, int]:
+    """从代理地址拆出 host / port，供端口探测和错误信息匹配使用。"""
+    parsed = urllib.parse.urlsplit(github_proxy_url())
+    try:
+        port = int(parsed.port) if parsed.port else 80
+    except ValueError:
+        port = 80
+    return parsed.hostname or "127.0.0.1", port
+
 
 class GitService:
     def __init__(self, log: Callable[[str], None] | None = None, progress: Callable[[str, int, int, str], None] | None = None):
@@ -207,7 +228,8 @@ class GitService:
             # A stale local proxy should not make GitHub appear offline forever.
             # Retry only when Git explicitly reports the loopback proxy refusal;
             # the user's global Git configuration remains untouched.
-            if "127.0.0.1:11304" in detail:
+            _proxy_host, _proxy_port = _github_proxy_host_port()
+            if f"{_proxy_host}:{_proxy_port}" in detail:
                 direct_command = [self.git, *self.ssl_args, "-c", "http.https://github.com.proxy=", *args]
                 try:
                     direct_result = subprocess.run(
@@ -312,8 +334,9 @@ class GitService:
     def _github_reachable(self) -> bool:
         """快速探测本地 GitHub 代理端口是否开启（2 秒），不通就跳过 GitHub。"""
         import socket
+        host, port = _github_proxy_host_port()
         try:
-            with socket.create_connection(("127.0.0.1", 11304), timeout=2):
+            with socket.create_connection((host, port), timeout=2):
                 return True
         except OSError:
             return False
@@ -364,6 +387,122 @@ class GitService:
         if base.name.casefold() == project.name.casefold() and (base / ".git").is_dir():
             base = base.parent
         return base / project.name
+
+    # ------------------------------------------------------------------
+    # 提交历史（查看 + 恢复）
+    # ------------------------------------------------------------------
+
+    def commit_history(
+        self, cwd: str | Path, ref: str = "HEAD", limit: int = 100, skip: int = 0
+    ) -> list[dict]:
+        """列出仓库 ref 上的提交（新→旧）：hash / 短 hash / 作者 / 时间 / 说明。
+
+        skip 用于「加载更多」分页：skip=100 取第 101 条起的 limit 条。
+        纯只读操作；空仓库（还没有任何提交）会抛 GitCommandError，由调用方转成
+        「该渠道还没有提交」的提示。
+        """
+        args = ["log", f"-n{int(limit)}"]
+        if skip:
+            args.append(f"--skip={int(skip)}")
+        args += ["--date=iso-strict",
+                 "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%s", ref]
+        raw = self._run(
+            args,
+            cwd=cwd,
+            timeout=20,
+        )
+        commits: list[dict] = []
+        for line in raw.splitlines():
+            parts = line.split("\x1f", 4)
+            if len(parts) == 5:
+                commits.append({
+                    "hash": parts[0],
+                    "short": parts[1],
+                    "author": parts[2],
+                    "date": _format_git_date(parts[3]),
+                    "subject": parts[4],
+                })
+        return commits
+
+    def remote_commit_history(
+        self, project: ProjectConfig, remote: RemoteConfig, limit: int = 100, skip: int = 0
+    ) -> list[dict]:
+        """远端渠道的提交历史：先 fetch 再 log FETCH_HEAD。
+
+        fetch 只更新 Git 元数据、绝不动工作区（与 remote_status 的做法一致），
+        所以远端渠道的历史查询不会碰用户文件。
+        """
+        effective_url = remote.url or self.repository_url_for_project(remote, project.name)
+        if not effective_url:
+            raise GitCommandError("渠道地址为空，请先在渠道配置里补全")
+        path = Path(project.workspace_path)
+        branch = remote.branch or project.default_branch
+        if branch in {"(detached)", "HEAD"}:
+            branch = ""
+        if not branch:
+            raise GitCommandError("渠道分支为空，请先在渠道配置里填写分支")
+        self._run(
+            ["fetch", "--no-tags", "--quiet", effective_url, branch],
+            cwd=path,
+            timeout=30,
+            extra_env=self._auth_env(remote),
+        )
+        return self.commit_history(path, "FETCH_HEAD", limit, skip=skip)
+
+    def restore_workspace_to_commit(self, project: ProjectConfig, commit_hash: str) -> dict:
+        """把工作区恢复到指定提交（git reset --hard <hash>）。
+
+        安全边界（弹窗里会把这些讲给用户听）：
+        - 只动 Git 已跟踪的文件；untracked（用户的素材、还没提交的新文件）一律不碰
+        - 工作区有未提交修改时，先把整个工作区备份到同级目录（不含 .git），
+          备份失败立即中止——绝不裸恢复
+        - hash 先经 cat-file 校验是真实存在的提交，防止任意字符串喂给 reset
+        """
+        path = Path(project.workspace_path)
+        if not path.is_dir():
+            raise GitCommandError(f"项目目录不存在：{path}")
+        self._run(["cat-file", "-e", f"{commit_hash}^{{commit}}"], cwd=path, timeout=10)
+        backup_path = ""
+        dirty = self._run(["status", "--porcelain"], cwd=path, timeout=30)
+        if dirty.strip():
+            backup_path = self._backup_workspace_snapshot(project)
+        self._run(["reset", "--hard", commit_hash], cwd=path, timeout=60)
+        return {"backup_path": backup_path}
+
+    def _backup_workspace_snapshot(self, project: ProjectConfig) -> str:
+        """恢复前的保险备份：整目录复制到 <项目名>-backup-<时间>（排除 .git）。"""
+        source = Path(project.workspace_path)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        target = source.parent / f"{source.name}-backup-{stamp}"
+        if os.name == "nt":
+            cmd = [
+                "robocopy", str(source), str(target),
+                "/E", "/NP", "/NFL", "/NDL", "/NJH", "/NJS",
+                "/R:1", "/W:1",
+                "/XD", str(source / ".git"),
+                "/XF", "Thumbs.db",
+            ]
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=600,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise GitCommandError("恢复前备份超时（600 秒）") from exc
+            # robocopy 退出码 0-7 均为成功（>=8 才是真错误），与全量镜像一致
+            if result.returncode >= 8 or not target.is_dir():
+                detail = (result.stderr or result.stdout or "").strip()
+                raise GitCommandError(
+                    f"恢复前备份失败（robocopy 退出码 {result.returncode}）{detail}"
+                )
+        else:
+            shutil.copytree(source, target, ignore=shutil.ignore_patterns(".git"))
+        return str(target)
 
     def _github_slug(self, remote: RemoteConfig, project: ProjectConfig) -> tuple[str, str] | None:
         """从渠道地址（或账号 + 项目名）里取出 owner / repo，供 API 调用。"""
@@ -428,7 +567,7 @@ class GitService:
             headers["Authorization"] = f"token {remote.secret}"
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(url, headers=headers, method=method, data=body)
-        proxy_url = "http://127.0.0.1:11304"
+        proxy_url = github_proxy_url()
         if remote.kind == "github":
             # GitHub API 必须显式走本地代理，否则 urllib 直连会被墙卡死
             opener = urllib.request.build_opener(
