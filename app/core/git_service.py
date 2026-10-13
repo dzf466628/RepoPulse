@@ -1141,6 +1141,16 @@ class GitService:
                     result["ahead"] = 0
                     result["behind"] = 0
                     try:
+                        # 备份仓里可能还没有工作区的新提交对象：工作区领先时
+                        # rev-list 会因对象缺失直接失败，导致步数永远是 0。
+                        # 先把源 HEAD fetch 进备份仓（只更新对象库和 FETCH_HEAD，
+                        # 不 checkout、不动备份仓工作区），再比较就能算出准确步数。
+                        source_branch = str(local.get("branch") or "HEAD")
+                        self._run(
+                            ["fetch", "--no-tags", "--quiet", str(project.workspace_path), source_branch],
+                            cwd=channel_path,
+                            timeout=30,
+                        )
                         counts = self._run(
                             ["rev-list", "--left-right", "--count", f"{local.get('head')}...{result.get('head')}"],
                             cwd=channel_path,
@@ -1249,6 +1259,7 @@ class GitService:
         progress: Callable[[], None] | None = None,
         ignore_github_failure: bool = False,
         skip_github: set[str] | None = None,
+        skip_kinds: set[str] | None = None,
     ) -> dict:
         local = self.local_status(project)
         if progress:
@@ -1256,7 +1267,21 @@ class GitService:
         remotes = {}
         for key, remote in project.remotes.items():
             remote_url = remote.url or self.repository_url_for_project(remote, project.name)
-            if (
+            if skip_kinds and remote.kind in skip_kinds:
+                # 快速对比模式：整类渠道直接跳过，连端口探测都不做——GitHub 要过
+                # 代理、慢且易失败，全项目快速检查时忽略它。字段结构与下面
+                # "跳过"分支保持一致，界面照常显示"已忽略"，tooltip 给出原因。
+                remotes[key] = {
+                    "label": remote.label or {
+                        "local": "本地 Git", "nas": "NAS Gitea", "github": "GitHub",
+                    }.get(remote.kind, remote.kind),
+                    "url": remote_url,
+                    "relation": "未代理",
+                    "online": False,
+                    "ignored": True,
+                    "error": "本次快速对比已跳过（加速）",
+                }
+            elif (
                 skip_github is not None
                 and remote.kind == "github"
                 and remote_url in skip_github

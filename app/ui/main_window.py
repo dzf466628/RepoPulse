@@ -544,11 +544,13 @@ class StatusCard(QFrame):
             # 标签天生安全，所以直接把图标和数字加进头部布局。
             for kind, value in stats:
                 icon = QLabel()
+                icon.setObjectName("cardStat")
                 icon.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 icon.setPixmap(render_glyph_pixmap(kind, GLYPH_COLORS.get(kind, ""), 13))
                 icon.setFixedWidth(14)
                 icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 number = QLabel(value)
+                number.setObjectName("cardStat")
                 number.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 number.setStyleSheet("color: #D7DFEB; font-size: 12px; background: transparent;")
                 header.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -959,8 +961,10 @@ class ProjectListDelegate(QStyledItemDelegate):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, auto_check: bool = True):
         super().__init__()
+        # auto_check=False 供测试（offscreen 冒烟）使用：不排启动后的自动检查，
+        # 避免在测试环境里对真实配置的项目发起网络请求。
         self.setWindowTitle("RepoPulse · Git 状态台")
         self.setFixedSize(900, 620)
         self.app_icon = QIcon(str(Path(__file__).resolve().parents[2] / "RepoPulse.png"))
@@ -1021,9 +1025,12 @@ class MainWindow(QMainWindow):
         self._history_worker: CommitHistoryWorker | None = None
         self._load_more_worker: CommitHistoryWorker | None = None
         self._restore_worker: RestoreCommitWorker | None = None
-        QTimer.singleShot(250, lambda: self.refresh_all(track_usage=False))
-        QTimer.singleShot(1200, self._check_git_environment)
-        QTimer.singleShot(2500, self._check_update_auto)
+        if auto_check:
+            # 启动后自动做一轮"全项目快速对比"（跳过 GitHub）：所有项目都检查，
+            # 不管项目开关是否打开——开关只控制同步，不影响状态查看。
+            QTimer.singleShot(250, lambda: self.refresh_all(track_usage=False, show_dialog=False))
+            QTimer.singleShot(1200, self._check_git_environment)
+            QTimer.singleShot(2500, self._check_update_auto)
 
     def showEvent(self, event):  # noqa: N802 - Qt API
         super().showEvent(event)
@@ -1440,7 +1447,7 @@ class MainWindow(QMainWindow):
         refresh_button.setFixedHeight(30)
         refresh_button.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        refresh_button.setToolTip("刷新全部项目和 Git 渠道状态")
+        refresh_button.setToolTip("全部项目做本地与远程对比（跳过 GitHub，更快）")
         refresh_button.clicked.connect(lambda _checked=False: self.refresh_all())
         self.pull_button = QPushButton("拉取到本地")
         self.pull_button.setObjectName("quickAction")
@@ -1667,6 +1674,11 @@ class MainWindow(QMainWindow):
             label = remote.label or remote.kind
             if not data:
                 summary_lines.append(f"<span style='color:#A9B5C8'>{html.escape(label)}：待刷新</span>")
+                continue
+            if data.get("ignored"):
+                # 被忽略的渠道（GitHub 未代理 / 快速对比主动跳过）不是"连接失败"，
+                # 否则详情页会一片红，看着像出了大事。
+                summary_lines.append(f"<span style='color:#F5C26B'>{html.escape(label)}：已忽略</span>")
                 continue
             if data.get("error"):
                 summary_lines.append(f"<span style='color:#F27788'>{html.escape(label)}：连接失败</span>")
@@ -1898,8 +1910,8 @@ class MainWindow(QMainWindow):
         telemetry.track("项目开关")
         project.sync_enabled = not project.sync_enabled
         self.store.save(self.projects)
-        if not project.sync_enabled:
-            self.results.pop(project.project_id, None)
+        # 开关只控制"是否参与同步"，不再清空检查结果——关闭后照样能在
+        # 列表和卡片上看到该项目的本地↔远程对比状态。
         self._reload_project_list(select_id=project.project_id)
         if self._current_project() and self._current_project().project_id == project.project_id:
             self._render_cards(self.results.get(project.project_id))
@@ -1918,7 +1930,7 @@ class MainWindow(QMainWindow):
             return
         self.selected_git_key = None
         self._render_cards(self.results.get(project.project_id))
-        # 未开启同步的项目没有完整检查结果，轻量读一次本地暂存区状态（显示"未创建/干净/有改动"）
+        # 还没有检查结果的项目（如刚新建、尚未刷新），先轻量读一次本地状态
         if project.project_id not in self.results:
             self._refresh_local_status(project)
 
@@ -2019,8 +2031,11 @@ class MainWindow(QMainWindow):
             if data.get("ahead") is None and data.get("behind") is None:
                 # 压根没比成（比如工作区还没提交），不是“领先/落后”
                 return "warning", "待同步"
-            # 原来这里写的是「版本不同」，跟正文的「本地领先/远程领先」两套话术，
-            # 现在统一成方向词。
+            if not data.get("ahead") and not data.get("behind"):
+                # 版本不同、但方向没算出来（典型：备份仓里缺对象）：如实报
+                # “版本不同”。绝不能因为 0/0 就显示成“一致”——那等于把差异藏起来。
+                return "warning", "版本不同"
+            # 方向能算出来的，统一成方向词（待推送 / 待拉取）。
             return "warning", sync_badge_text(data)
         if not data.get("online"):
             return "error", "未连接"
@@ -3650,11 +3665,16 @@ class MainWindow(QMainWindow):
         if fw is not None:
             fw.set_task(text)
 
-    def refresh_all(self, *, track_usage: bool = True) -> None:
+    def refresh_all(self, *, track_usage: bool = True, show_dialog: bool = True) -> None:
         if track_usage:
             telemetry.track("刷新全部")
         self._set_floating_task("检查中…")
-        self._start_refresh([project for project in self.projects if project.sync_enabled])
+        # 全部项目都参与本地↔远程对比，不再要求项目开关打开（开关只控制同步，
+        # 不影响状态查看）；GitHub 渠道跳过——要过代理、慢且易失败，
+        # 快速对比先把 NAS / 本地 Git 的结果拿出来。
+        # show_dialog=False（启动自动检查）：不弹模态等待框，进度条、日志和
+        # 悬浮窗照样实时反馈，用户打开软件就能操作，不用先等一轮检查。
+        self._start_refresh(list(self.projects), show_dialog=show_dialog, skip_kinds={"github"})
 
     def refresh_selected(self, show_dialog: bool = True, *, track_usage: bool = False) -> None:
         project = self._current_project()
@@ -3665,11 +3685,16 @@ class MainWindow(QMainWindow):
             if track_usage:
                 telemetry.track("刷新选中")
         else:
-            # 未开启同步的项目只轻量刷新本地暂存区状态（如刚创建完仓库）
-            self._refresh_local_status(project)
+            # 未开启同步的项目：也做一次完整对比（跳过 GitHub，快），
+            # 而不是只读本地暂存区——用户点了刷新就该看到有没有"不同"。
+            self._start_refresh([project], show_dialog=show_dialog, skip_kinds={"github"})
 
-    def _start_refresh(self, projects: list[ProjectConfig], show_dialog: bool = True) -> None:
-        projects = [project for project in projects if project.sync_enabled]
+    def _start_refresh(
+        self,
+        projects: list[ProjectConfig],
+        show_dialog: bool = True,
+        skip_kinds: set[str] | None = None,
+    ) -> None:
         if not projects or (self.worker and self.worker.isRunning()):
             return
         self._auto_sync_delay_timer.stop()
@@ -3681,12 +3706,20 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFormat("%p%")
         self._set_progress_style("running")
         self._append_log("开始刷新状态……")
+        if skip_kinds:
+            names = "、".join({"github": "GitHub"}.get(kind, kind) for kind in sorted(skip_kinds))
+            self._append_log(f"快速对比：已跳过 {names} 渠道（加速）")
         # 每轮刷新重新检测 GitHub：上一轮因代理未开而短路过的仓库不能跨轮一直
         # 判成“未代理”。本批次内若某项目 GitHub 失败，仍会把其地址加入集合，
         # 让本批次后续项目跳过重复探测（性能），但下一轮刷新会重新尝试。
         self._github_bad.clear()
         values = self._sync_settings()
-        self.worker = StatusWorker(projects, ignore_github_failure=bool(values["ignore_github"]), skip_github=self._github_bad)
+        self.worker = StatusWorker(
+            projects,
+            ignore_github_failure=bool(values["ignore_github"]),
+            skip_github=self._github_bad,
+            skip_kinds=skip_kinds,
+        )
         self.worker.project_ready.connect(self._on_project_ready)
         self.worker.log_message.connect(self._append_log)
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -3708,9 +3741,8 @@ class MainWindow(QMainWindow):
             return
         threshold = max(1, int(values["threshold"]))
         project = next((item for item in self.projects if item.project_id == result.get("project_id")), None)
-        if project and not project.sync_enabled:
-            self.results.pop(project.project_id, None)
-            return
+        # 未开启同步的项目只保留对比结果（要能在列表/卡片上看到"不同"），
+        # 但绝不触发自动同步——开关是同步的闸门。
         if not project or not project.sync_enabled:
             return
         if not any(

@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QEventLoop, Qt, QTimer
 from PyQt6.QtWidgets import QApplication, QLabel
 
 from app.core.git_locator import (
@@ -20,6 +21,7 @@ from app.core.git_locator import (
     ca_bundle_path,
     check_git,
     git_lfs_version,
+    resolve_git_path,
     ssl_override_args,
 )
 from app.core.git_service import GitService
@@ -34,6 +36,7 @@ from app.ui.main_window import (
     short_number,
     sync_badge_text,
 )
+from app.workers import StatusWorker
 
 
 app = QApplication(sys.argv)
@@ -53,7 +56,9 @@ def check(name: str, fn) -> None:
 
 
 def test_window_creates() -> None:
-    window = MainWindow()
+    # auto_check=False：offscreen 下不排任何启动自检（刷新/环境检查/更新检查），
+    # 避免测试里对真实配置的项目发起网络请求或弹出更新提示。
+    window = MainWindow(auto_check=False)
     assert window.minimumWidth() >= 900
     window._allow_close = True
     window.close()
@@ -173,6 +178,7 @@ def test_badge_texts_fit() -> None:
     candidates = [
         "一致", "待推送", "待拉取", "已分叉", "待首次同步", "待创建", "待同步",
         "已忽略", "未连接", "连接失败", "读取失败", "未配置", "分支不存在", "等待检查",
+        "版本不同",
         *BADGE_TEXT.values(),
     ]
     for text in candidates:
@@ -186,7 +192,7 @@ def test_badge_texts_fit() -> None:
 
 def test_badge_states() -> None:
     """角标：方向说清楚、报错原文不进角标、术语跟分叉弹窗一致。"""
-    window = MainWindow()
+    window = MainWindow(auto_check=False)
     nas, local, github = _StubRemote("nas"), _StubRemote("local"), _StubRemote("github")
     cases = [
         (nas, {"online": True, "relation": "本地领先", "ahead": 3, "behind": 0}, "待推送"),
@@ -252,7 +258,13 @@ def test_short_number() -> None:
 
 
 def test_github_stats_widget_width() -> None:
-    """星标 + 浏览量那一块要窄（角标左边就那么点地方）。"""
+    """星标 + 浏览量那一块要窄（角标左边就那么点地方）。
+
+    统计元素以 objectName="cardStat" 标记（icon + 数字），这里量整块的总宽：
+    两个图标（各 14px）+ 数字 + 组间 6px 间距与收尾 2px，总计必须 ≤96px。
+    按名字定位而不是按布局下标 —— 之前按下标 `count - 2` 定位，布局里多一个
+    spacing 就取到空值，测试反而先坏了。
+    """
     card = StatusCard(
         "k", "GitHub Remote · GitHub", "", "待推送", "#9CC6FF", "地址：x",
         rich_body=True, recent_commit="修复登录问题",
@@ -262,11 +274,11 @@ def test_github_stats_widget_width() -> None:
     card.show()
     app.processEvents()
     try:
-        header = card.layout().itemAt(0).layout()
-        widget = header.itemAt(header.count() - 2).widget()
-        assert widget is not None, "统计元素没有加进头部"
-        width = widget.sizeHint().width()
-        assert width <= 96, f"统计元素太宽：{width}px"
+        stats = card.findChildren(QLabel, "cardStat")
+        assert stats, "统计元素没有加进头部"
+        total = sum(label.sizeHint().width() for label in stats)
+        total += 6 * 2 + 2  # 两组统计的组内间距（6+6）与收尾（2）
+        assert total <= 96, f"统计元素太宽：{total}px"
     finally:
         card.close()
 
@@ -276,6 +288,82 @@ def test_github_metrics_quiet() -> None:
     service = GitService()
     assert service.github_metrics(_StubRemote("local"), None) == {}
     assert service.github_metrics(_StubRemote("nas"), None) == {}
+
+
+def test_inspect_skips_kinds() -> None:
+    """快速对比模式：skip_kinds 指定的渠道直接跳过，不发任何探测。
+
+    工作区目录故意不存在 —— local_status 直接返回"未创建"，整条链路
+    零 git、零网络；github 渠道必须是 ignored 且带跳过原因。
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        project = ProjectConfig(
+            project_id="fast",
+            name="快速对比",
+            workspace_path=str(Path(directory) / "not-created"),
+            remotes={
+                "github": RemoteConfig(
+                    "github", "https://github.com/example/never-requested.git",
+                ),
+            },
+        )
+        result = GitService().inspect_project(project, skip_kinds={"github"})
+        github = result["remotes"]["github"]
+        assert github.get("ignored") is True, "github 渠道没有被跳过"
+        assert github.get("online") is False
+        assert "跳过" in str(github.get("error") or ""), f"跳过原因缺失：{github}"
+        assert result["local"].get("uncreated") is True
+
+
+def test_status_worker_parallel_completes() -> None:
+    """StatusWorker：多项目并发检查，结果与进度要完整送达。
+
+    三个真实小仓库并行检查；断言结果一个不少、进度计数单调走到 (n, n)，
+    这正是"所有项目都做对比"这条需求的执行层保障。
+    """
+    git = resolve_git_path()
+    assert git, "没找到 Git（源码运行请先执行 tools\\fetch_minigit.ps1）"
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        projects = []
+        for index in range(3):
+            repo = root / f"proj{index}"
+            repo.mkdir()
+            subprocess.run(
+                [git, "-C", str(repo), "init", "-q", "-b", "main"],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                [git, "-C", str(repo), "-c", "user.name=smoke",
+                 "-c", "user.email=smoke@test",
+                 "commit", "-q", "--allow-empty", "-m", "init"],
+                check=True, capture_output=True,
+            )
+            projects.append(ProjectConfig(
+                project_id=f"p{index}", name=f"项目{index}", workspace_path=str(repo),
+            ))
+
+        worker = StatusWorker(projects)
+        ready_ids: list[str] = []
+        progress: list[tuple[int, int]] = []
+        finished = {"done": False}
+        worker.project_ready.connect(lambda pid, _result: ready_ids.append(pid))
+        worker.progress_changed.connect(lambda done, total: progress.append((done, total)))
+        worker.completed.connect(lambda: finished.__setitem__("done", True))
+
+        loop = QEventLoop()
+        worker.completed.connect(loop.quit)
+        guard = QTimer()
+        guard.setSingleShot(True)
+        guard.timeout.connect(loop.quit)
+        guard.start(10000)
+        worker.start()
+        loop.exec()
+        worker.wait(5000)
+
+        assert finished["done"], "StatusWorker 10 秒内没有完成"
+        assert sorted(ready_ids) == ["p0", "p1", "p2"], f"结果不完整：{ready_ids}"
+        assert progress and progress[-1] == (3, 3), f"进度计数异常：{progress}"
 
 
 if __name__ == "__main__":
@@ -297,6 +385,8 @@ if __name__ == "__main__":
     check("热度数字压缩（1.2k / 12.3w）", test_short_number)
     check("热度元素宽度 ≤96px", test_github_stats_widget_width)
     check("非 GitHub 渠道不发热度请求", test_github_metrics_quiet)
+    check("快速对比跳过渠道（skip_kinds）", test_inspect_skips_kinds)
+    check("并发检查结果完整（StatusWorker）", test_status_worker_parallel_completes)
     print("=" * 50)
     print(f"PASSED {PASSED}  |  FAILED {FAILED}")
     raise SystemExit(0 if FAILED == 0 else 1)
