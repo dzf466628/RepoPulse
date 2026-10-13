@@ -1342,7 +1342,8 @@ class MainWindow(QMainWindow):
         self.project_list = ProjectListWidget()
         self.project_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.project_list.switch_clicked.connect(self._toggle_project_sync)
-        self.project_list.setMinimumHeight(500)
+        # 不设最小高度：让列表自然填满左栏剩余空间，项目排满后由纵向滚动条接管。
+        # 原先的 setMinimumHeight(500) 超出了左栏实际可用高度，会把列表底部顶出窗口。
         self.project_list.setIconSize(QSize(40, 40))
         self.project_list.setStyleSheet(
             "QListWidget::item { padding: 0; margin: 0; border: 0; }"

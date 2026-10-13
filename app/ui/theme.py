@@ -73,9 +73,11 @@ def apply_theme(app: QApplication) -> None:
         QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; color: #8CECEF; }
         QHeaderView::section { background: #103448; color: #CDD6E5; padding: 6px; border: 0; }
         QTableWidget { gridline-color: #1E4B5C; }
-        QScrollBar:vertical { width: 6px; background: transparent; }
-        QScrollBar::handle:vertical { background: #2C7180; border-radius: 3px; min-height: 24px; }
+        QScrollBar:vertical { width: 7px; background: transparent; margin: 2px 1px 2px 0; }
+        QScrollBar::handle:vertical { background: #2F7E90; border-radius: 3px; min-height: 24px; }
+        QScrollBar::handle:vertical:hover { background: #58B7C9; }
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }
         """
     )
     # Keep a strong reference so the filter is not garbage-collected (pitfall 18).
